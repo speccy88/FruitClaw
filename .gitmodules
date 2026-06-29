@@ -1,0 +1,8 @@
+[submodule "nuttx"]
+	path = nuttx
+	url = https://github.com/speccy88/FruitClaw-nuttx.git
+	branch = master
+[submodule "apps"]
+	path = apps
+	url = https://github.com/speccy88/FruitClaw-apps.git
+	branch = master
