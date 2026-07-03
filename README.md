@@ -18,20 +18,20 @@ stays clean and rebuildable:
 The current FruitClaw operator preview UF2 is:
 
 ```text
-artifacts/fruitclaw-operator-alpha-preview-20260703-161328.uf2
+artifacts/fruitclaw-operator-alpha-preview-20260703-163832.uf2
 ```
 
 SHA-256:
 
 ```text
-db7edab33c464036a1e1bec5081e2599a121205dcb9234d0c8950168e47a2480
+7b66004a230890e0989e1f84351f4978a92ad74fc957345c16091ee44fad0085
 ```
 
 It was built from:
 
 ```text
 FruitClaw wrapper: the GitHub release tag records the exact wrapper commit
-apps submodule:    8148876a6de046029baf98854aa48bd48b11b4c3
+apps submodule:    2f0ae270e5e0a369f632bf2bb4e71e9636a72e42
 nuttx submodule:   a21db85c758aae9ecce210b9f3e12168f39b5548
 profile:           adafruit-fruit-jam-rp2350:esp-hosted
 ```
@@ -39,23 +39,27 @@ profile:           adafruit-fruit-jam-rp2350:esp-hosted
 Build size from `arm-none-eabi-size nuttx/nuttx`:
 
 ```text
-text=1179808  data=272  bss=206824  total=1386904 bytes
+text=1179648  data=272  bss=206824  total=1386744 bytes
 ```
 
 Linker memory report:
 
 ```text
-FLASH: 1180080 B / 16 MB  (7.03%)
+FLASH: 1179920 B / 16 MB  (7.03%)
 RAM:    240888 B / 512 KB (45.95%)
 ```
 
-Hardware validation for this preview:
+Validation for this preview:
 
-- Built with `make -C nuttx -j8`.
-- Flashed to an RP2350B Fruit Jam with `picotool load -x`.
-- Booted with CDC console on `/dev/cu.usbmodem01`.
-- `fruitclaw selftest` passed on the flashed image.
-- `fruitclaw status` reported `bootstrap: ready`, webserver supervisor
+- Built with `make -C nuttx -j8` after regenerating the embedded uIP
+  webserver filesystem.
+- `nuttx/nuttx.uf2` matches
+  `artifacts/fruitclaw-operator-alpha-preview-20260703-163832.uf2` byte for
+  byte.
+- The previous same-runtime preview image was flashed to an RP2350B Fruit Jam
+  with `picotool load -x` and booted with CDC console on `/dev/cu.usbmodem01`.
+- On that flashed image, `fruitclaw selftest` passed and `fruitclaw status`
+  reported `bootstrap: ready`, webserver supervisor
   listening, MCP enabled, Berry enabled, scheduler enabled, NeoPixels enabled,
   device tools enabled, and no last tool error.
 - `device.read` rejects raw block devices before opening them, so MCP/Telegram
@@ -202,7 +206,7 @@ picotool load -x nuttx/nuttx.uf2
 Or flash the release asset:
 
 ```sh
-picotool load -x artifacts/fruitclaw-operator-alpha-preview-20260703-161328.uf2
+picotool load -x artifacts/fruitclaw-operator-alpha-preview-20260703-163832.uf2
 ```
 
 Open the USB console:
