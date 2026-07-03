@@ -1,3 +1,22 @@
 .DS_Store
 fruitclaw-wamr-spike/
 build-artifacts/
+.config
+
+# Local comparison checkouts used during bring-up.
+esp-claw/
+mimiclaw/
+picoclaw/
+
+# Local smoke/soak logs and helper process state.
+fruitclaw_*.jsonl
+fruitclaw_*.out
+fruitclaw_*.err
+fruitclaw_*.pid
+fruitclaw_*latest.meta
+
+# Preview artifacts are uploaded to GitHub releases. Force-add only the
+# historical artifacts that are intentionally kept in the repository.
+artifacts/*.uf2
+artifacts/*.bin
+artifacts/hstx-probe/

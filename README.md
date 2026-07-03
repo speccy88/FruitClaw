@@ -1,163 +1,155 @@
 # FruitClaw
 
-Adafruit Fruit Jam RP2350 NuttX bring-up workspace.
+FruitClaw is an Apache NuttX workspace for the Adafruit Fruit Jam RP2350.  The
+current preview image turns the board into a small owner-mode operator node:
+USB NSH, ESP-Hosted Wi-Fi, a static HTTP documentation/wiki server, a YOLO MCP
+endpoint, Telegram/DeepSeek agent plumbing, Berry scripting, LVGL/Berry
+bindings, NeoPixels, scheduler tools, Telnet/FTP service control, USB
+keyboard/mouse/Xbox input, and guarded recovery.
 
-This repository is the project wrapper for the two NuttX source repositories
-used by the bring-up:
+This repository is a wrapper around two source submodules so the NuttX history
+stays clean and rebuildable:
 
-- `nuttx`: board port and RP23xx support changes.
-- `apps`: Berry plus NSH helper applications.
+- `apps`: `https://github.com/speccy88/FruitClaw-apps.git`
+- `nuttx`: `https://github.com/speccy88/FruitClaw-nuttx.git`
 
-The source repositories are tracked here as submodules so their upstream NuttX
-history remains intact.
+## Current Preview Release
 
-## Current ESP-Hosted Release
-
-The current ESP-Hosted `wlan0` release is:
-
-| File | Purpose | SHA-256 |
-| --- | --- | --- |
-| `artifacts/fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin` | ESP32-C6 ESP-Hosted-MCU merged flash image. This replaces the stock NINA/AirLift firmware on the Fruit Jam coprocessor. | `1a1b35659dd62f44fa8c91b3e03f3fec80886072d04aeb6f192823eb28921c08` |
-| `artifacts/fruitclaw-esp-hosted-wlan0-20260629.uf2` | RP2350 NuttX host image with the Fruit Jam ESP-Hosted `wlan0` profile. | `c2ccb00bed4b264fd60c389ee6c3125827ea4ef4188a120b233a195a7d8ce615` |
-
-The ESP32-C6 image was built from `espressif/esp-hosted-mcu` commit
-`8f0770d39065c2a9ff6828268709c3502e0d5349` plus the Fruit Jam overlay at
-`nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/esp-hosted-mcu/`.
-The RP2350 UF2 was built from the checked-in `nuttx` submodule commit
-`ea72397d346e04a7e8ac015df026c02192accb54` and `apps` submodule commit
-`6a225eded40334823f39e23e4dbb01d2b3094142`.
-
-## Why Replace NINA/AirLift
-
-The stock Fruit Jam ESP32-C6 firmware follows the NINA/AirLift model: the
-RP2350 sends high-level socket commands to the coprocessor and the coprocessor
-owns most of the Wi-Fi/IP behavior. That is useful for CircuitPython-style
-network offload, but it is the wrong shape for operating systems such as NuttX
-or Linux when they should own DHCP, DNS, routing, sockets, services, packet
-timing, and diagnostics themselves.
-
-This ESP-Hosted path makes the ESP32-C6 a radio coprocessor instead. The
-ESP32-C6 handles Wi-Fi radio work and exchanges ESP-Hosted control/data frames
-over the existing Fruit Jam SPI wiring. NuttX owns the network stack and sees a
-normal `wlan0` interface, so normal tools such as `ifconfig`, `wapi`, `renew`,
-`ping`, `wget`, `telnetd`, `webserver`, `ftpd_start`, MQTT-C, and NTP can run
-against a real NuttX network device.
-
-## Flash ESP-Hosted
-
-You need to flash both chips:
-
-- Flash `fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin` to the ESP32-C6.
-- Flash `fruitclaw-esp-hosted-wlan0-20260629.uf2` to the RP2350.
-
-The ESP32-C6 `.bin` is not a UF2. Use Adafruit's Fruit Jam serial ESP32-C6
-passthrough UF2 as a temporary programmer bridge. The bridge UF2 is not the
-ESP-Hosted firmware; it only turns the RP2350 USB port into an ESP32-C6 serial
-flashing path.
-
-1. Download the ESP32-C6 `.bin` and RP2350 `.uf2` from this repository or the
-   matching GitHub release.
-2. Download Adafruit's Fruit Jam serial ESP32-C6 passthrough UF2 from the
-   official guide:
-   `https://learn.adafruit.com/adafruit-fruit-jam/upgrading-airlift-firmware`
-3. Put the Fruit Jam RP2350 into BOOTSEL and copy Adafruit's
-   `SerialESPPassthrough.ino.uf2` to the mounted `RP2350` drive.
-4. After the board reboots, find the passthrough serial port:
-
-```sh
-ls /dev/cu.usbmodem*
-```
-
-5. Flash the ESP32-C6:
-
-```sh
-python3 -m esptool --chip esp32c6 --before no_reset --after no_reset \
-  -p /dev/cu.usbmodem<PASSTHROUGH> -b 115200 \
-  write_flash 0 fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin
-```
-
-6. Put the RP2350 back into BOOTSEL and copy
-   `fruitclaw-esp-hosted-wlan0-20260629.uf2` to the mounted `RP2350` drive.
-7. Open the NuttX USB console and check `wlan0`:
-
-```sh
-ifup wlan0
-wapi psk wlan0 <passphrase> 3 2
-wapi essid wlan0 <ssid> 1
-renew wlan0
-ifconfig wlan0
-wapi scan wlan0
-ping -c 3 -I wlan0 <gateway-ip>
-esphostedctl
-```
-
-## Revert To Adafruit NINA/AirLift
-
-Reverting means replacing the ESP32-C6 firmware with Adafruit's Fruit Jam NINA
-firmware and then flashing whichever RP2350 UF2 you want to run afterward.
-
-1. Follow Adafruit's official Fruit Jam AirLift firmware guide:
-   `https://learn.adafruit.com/adafruit-fruit-jam/upgrading-airlift-firmware`
-2. Download the latest NINA firmware from:
-   `https://github.com/adafruit/nina-fw/releases/latest`
-3. Choose the Fruit Jam ESP32-C6 file. Adafruit names it like
-   `NINA_ADAFRUIT-fruitjam_c6-<version>.bin`.
-4. Use Adafruit's updater flow from the guide, or use the same passthrough
-   esptool method:
-
-```sh
-python3 -m esptool --chip esp32c6 --before no_reset --after no_reset \
-  -p /dev/cu.usbmodem<PASSTHROUGH> -b 115200 \
-  write_flash 0 NINA_ADAFRUIT-fruitjam_c6-<version>.bin
-```
-
-5. Put the RP2350 back into BOOTSEL and flash the desired Adafruit/CircuitPython
-   or Fruit Jam OS UF2. After this, the ESP32-C6 is back on the stock
-   NINA/AirLift socket-command path instead of ESP-Hosted raw-frame transport.
-
-## Current Snapshot
-
-The current hardware-tested image is:
+The current FruitClaw operator preview UF2 is:
 
 ```text
-artifacts/fruitjam-usbnsh-berry-ws2812-userled-buttons-examples-i2c-spi-sd-nina-20260629.uf2
+artifacts/fruitclaw-operator-alpha-preview-20260703-161328.uf2
 ```
 
-Verified on hardware:
+SHA-256:
 
-- USB CDC NSH on `/dev/ttyACM0` from the board side.
-- Berry built into the image.
-- GPIO29 active-low user LED driver and helper scripts.
-- Buttons on GPIO0, GPIO4, and GPIO5.
-- Five WS2812 NeoPixels on GPIO32 with example scripts under `/examples`.
-- STEMMA QT I2C0 on GPIO20/GPIO21.
-- SPI0 microSD card support with FAT mount at `/mnt/sd0`.
-- SPI1 low-level NINA/AirLift wiring enabled for future networking work.
+```text
+db7edab33c464036a1e1bec5081e2599a121205dcb9234d0c8950168e47a2480
+```
+
+It was built from:
+
+```text
+FruitClaw wrapper: the GitHub release tag records the exact wrapper commit
+apps submodule:    8148876a6de046029baf98854aa48bd48b11b4c3
+nuttx submodule:   a21db85c758aae9ecce210b9f3e12168f39b5548
+profile:           adafruit-fruit-jam-rp2350:esp-hosted
+```
+
+Build size from `arm-none-eabi-size nuttx/nuttx`:
+
+```text
+text=1179808  data=272  bss=206824  total=1386904 bytes
+```
+
+Linker memory report:
+
+```text
+FLASH: 1180080 B / 16 MB  (7.03%)
+RAM:    240888 B / 512 KB (45.95%)
+```
+
+Hardware validation for this preview:
+
+- Built with `make -C nuttx -j8`.
+- Flashed to an RP2350B Fruit Jam with `picotool load -x`.
+- Booted with CDC console on `/dev/cu.usbmodem01`.
+- `fruitclaw selftest` passed on the flashed image.
+- `fruitclaw status` reported `bootstrap: ready`, webserver supervisor
+  listening, MCP enabled, Berry enabled, scheduler enabled, NeoPixels enabled,
+  device tools enabled, and no last tool error.
+- `device.read` rejects raw block devices before opening them, so MCP/Telegram
+  cannot wedge the board by reading `/dev/mmcsd0`.
+
+## Important Preview Behavior
+
+This is an alpha/operator preview, not a locked-down community production image.
+
+- MCP is YOLO owner mode: no bearer token, no read-only policy layer, and MCP
+  calls run with `owner_mode=true`.
+- The image intentionally enables a 10-minute development max-uptime guard:
+  `CONFIG_FRUITCLAW_MAX_UPTIME_GUARD_MS=600000`.
+- Guarded failures recover to ROM BOOTSEL in this preview:
+  `CONFIG_FRUITCLAW_GUARD_BOOTSEL_RECOVERY=y`.
+- Production/community images should normally keep watchdog resets but disable
+  the 10-minute max-uptime guard and BOOTSEL conversion.
+- Secrets are runtime files only. Do not put Wi-Fi, Telegram, DeepSeek, or other
+  tokens in source, defconfig, README examples, or release notes.
+- TRMNL is not enabled in this FruitClaw preview. TRMNL source/configs live in
+  the tree for the separate display-client work, but `CONFIG_SYSTEM_TRMNL` is
+  off here.
+
+## Display Profile
+
+FruitClaw uses the safe color DVI profile, not the TRMNL 800x480 grayscale
+profile:
+
+```text
+CONFIG_RP23XX_HSTX_DVI_FB_RGB565_320X240=y
+# CONFIG_RP23XX_HSTX_DVI_FB_Y2_800X480 is not set
+CONFIG_RP23XX_HSTX_DVI_PIXEL_CLOCK=25200000
+CONFIG_RP23XX_HSTX_DVI_SCANOUT_PSRAM=y
+```
+
+The 25.2 MHz DVI pixel clock and PSRAM scanout setting come from the TRMNL/HSTX
+bring-up notes, but this operator build stays on the reliable 320x240 RGB565
+path for LVGL, CGOL, and general board work.
+
+TRMNL-specific timing notes are in:
+
+```text
+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/TRMNL_DVI_TIMING.md
+```
+
+## Installed User-Facing Features
+
+The `esp-hosted` preview profile currently enables:
+
+- `fruitclaw`: operator agent CLI, boot supervisor, MCP route, Telegram/DeepSeek
+  hooks, scheduler, memory, sessions, Berry wrapper, service control, and tools.
+- uIP webserver on port 80 with a static Markdown wiki under the web root.
+- MCP Streamable HTTP endpoint at `/mcp`.
+- Telnet server (`telnetd`) and FTP server (`ftpd_start`/`ftpd_stop`) with
+  FruitClaw service supervisor support.
+- Berry interpreter plus FruitClaw Berry runner and LVGL bindings.
+- LVGL 9.2.2 app support and example Berry LVGL scripts in board ROMFS.
+- USB host for keyboard, mouse, hub, composite devices, and Xbox controller.
+- `vi`, `cgol` Conway's Game of Life, `rtttl`, `neopixels`, `dvictrl`,
+  `piousbhost`, `wapi`, `renew`, `ping`, `wget`, `ntpc`, `i2c`, `spi`, and NSH.
+- NeoPixels on `/dev/leds0`.
+- Device tools for bounded non-block `/dev` access. Raw block devices such as
+  `/dev/mmcsd*`, `/dev/ram*`, `/dev/mtd*`, and `/dev/smart*` are denied.
+
+The running board is the source of truth. Use:
+
+```sh
+fruitclaw status
+fruitclaw tools
+help
+```
 
 ## Clone
 
+Use recursive submodules:
+
 ```sh
 git clone --recurse-submodules https://github.com/speccy88/FruitClaw.git
+cd FruitClaw
 ```
 
-If already cloned without submodules:
+If the checkout already exists:
 
 ```sh
 git submodule update --init --recursive
+git -C apps checkout master
+git -C nuttx checkout master
+git -C apps pull --ff-only fruitclaw master
+git -C nuttx pull --ff-only fruitclaw master
 ```
 
-## Build
+## Build The Preview UF2
 
-Baseline USB NSH build from the `nuttx` submodule:
-
-```sh
-./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:usbnsh
-make -j8
-```
-
-The generated UF2 is `nuttx/nuttx.uf2`.
-
-ESP-Hosted `wlan0` build:
+Native macOS/Linux build:
 
 ```sh
 export PATH="$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH"
@@ -166,19 +158,242 @@ cd nuttx
 make -j8
 ```
 
-ESP32-C6 ESP-Hosted-MCU build:
+The generated UF2 is:
 
-```sh
-git clone --recurse-submodules https://github.com/espressif/esp-hosted-mcu.git
-cd esp-hosted-mcu
-git checkout 8f0770d39065c2a9ff6828268709c3502e0d5349
-git submodule update --init --recursive
-cd slave
-cp /path/to/FruitClaw/nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/esp-hosted-mcu/sdkconfig.defaults.fruitjam-esp32c6 .
-. /Users/fred/esp/v5.5.4/esp-idf/export.sh
-idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.fruitjam-esp32c6" set-target esp32c6
-idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.fruitjam-esp32c6" build
-idf.py merge-bin
+```text
+nuttx/nuttx.uf2
 ```
 
-The generated ESP32-C6 image is `build/merged-binary.bin`.
+After Kconfig or defconfig changes:
+
+```sh
+export PATH="$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH"
+cd nuttx
+make olddefconfig
+make -j8
+```
+
+## Docker Incremental Builds
+
+The helper below is for a warm Docker build tree. It avoids rebuilding the whole
+world when only FruitClaw-relevant paths changed:
+
+```sh
+scripts/fruitclaw_docker_incremental.sh --configure
+scripts/fruitclaw_docker_incremental.sh
+```
+
+The helper expects a warm tree at `/tmp/fruitclaw-docker-build` by default and
+uses `ghcr.io/apache/nuttx/apache-nuttx-ci-linux:latest` unless
+`FC_DOCKER_IMAGE` is set. It copies the warm result to:
+
+```text
+artifacts/fruitclaw-esp-hosted-docker-latest.uf2
+```
+
+## Flash The RP2350 UF2
+
+With the board in BOOTSEL:
+
+```sh
+picotool load -x nuttx/nuttx.uf2
+```
+
+Or flash the release asset:
+
+```sh
+picotool load -x artifacts/fruitclaw-operator-alpha-preview-20260703-161328.uf2
+```
+
+Open the USB console:
+
+```sh
+ls /dev/cu.usbmodem*
+screen /dev/cu.usbmodem01 115200
+```
+
+Useful first commands:
+
+```sh
+uname -a
+fruitclaw status
+fruitclaw selftest
+dvictrl info
+help
+```
+
+## Runtime Storage
+
+FruitClaw prefers SD storage when mounted and falls back to tmpfs:
+
+```text
+/mnt/sd0/fruitclaw
+/data/fruitclaw
+```
+
+Typical runtime files:
+
+```text
+system.md
+user.md
+memory.jsonl
+schedules.json
+router_rules.json
+telegram_offset
+telegram_allowed_chats.txt
+sessions/
+scripts/
+secrets/
+services/
+```
+
+The selftest run in this release used `/data/fruitclaw` because SD was not
+mounted in that session.
+
+## Configure Wi-Fi And Secrets
+
+Do not commit real credentials. Enter them on the board:
+
+```sh
+fruitclaw config set-wifi "<ssid>" "<password>"
+fruitclaw config set-secret telegram "<telegram-bot-token>"
+fruitclaw config set-secret deepseek "<deepseek-api-key>"
+```
+
+If no values are passed, the command prompts on the serial console:
+
+```sh
+fruitclaw config set-wifi
+fruitclaw config set-secret telegram
+fruitclaw config set-secret deepseek
+```
+
+Check the result without printing secret values:
+
+```sh
+fruitclaw config
+fruitclaw wifi-up
+ifconfig wlan0
+ping -c 3 1.1.1.1
+```
+
+The preview seeds the known owner chat ID into
+`telegram_allowed_chats.txt` when the data root is initialized. To discover or
+change the allowed chat list:
+
+```sh
+fruitclaw telegram-discover
+cat /data/fruitclaw/telegram_allowed_chats.txt
+echo "<numeric-chat-id>" > /data/fruitclaw/telegram_allowed_chats.txt
+```
+
+Use `/mnt/sd0/fruitclaw/...` instead of `/data/fruitclaw/...` when SD is the
+active data root.
+
+## Run FruitClaw
+
+The preview autostarts `fruitclaw boot` from `rcS`. You can also run the main
+foreground service manually:
+
+```sh
+fruitclaw start
+```
+
+Useful checks:
+
+```sh
+fruitclaw status
+fruitclaw tools
+fruitclaw telegram-test
+fruitclaw deepseek-test
+fruitclaw terminal-run uname -a
+fruitclaw terminal-run ls /dev
+fruitclaw neopixels blue
+fruitclaw neopixels off
+fruitclaw service status
+fruitclaw service start ftpd
+fruitclaw service start telnetd
+```
+
+MCP endpoint:
+
+```text
+http://<board-ip>/mcp
+```
+
+Documentation/wiki endpoint:
+
+```text
+http://<board-ip>/
+```
+
+## ESP32-C6 ESP-Hosted Firmware
+
+FruitClaw Wi-Fi expects the Fruit Jam ESP32-C6 to run ESP-Hosted-MCU, not the
+stock NINA/AirLift firmware.
+
+The last published ESP-Hosted release assets are:
+
+| File | Purpose | SHA-256 |
+| --- | --- | --- |
+| `artifacts/fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin` | ESP32-C6 ESP-Hosted-MCU merged flash image. | `1a1b35659dd62f44fa8c91b3e03f3fec80886072d04aeb6f192823eb28921c08` |
+| `artifacts/fruitclaw-esp-hosted-wlan0-20260629.uf2` | Earlier RP2350 NuttX ESP-Hosted host image. | `c2ccb00bed4b264fd60c389ee6c3125827ea4ef4188a120b233a195a7d8ce615` |
+
+The ESP32-C6 image was built from upstream `espressif/esp-hosted-mcu` commit:
+
+```text
+8f0770d39065c2a9ff6828268709c3502e0d5349
+```
+
+with the Fruit Jam overlay at:
+
+```text
+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/esp-hosted-mcu/
+```
+
+Why ESP-Hosted: the stock NINA/AirLift model makes the coprocessor own the
+socket stack. ESP-Hosted makes the ESP32-C6 a Wi-Fi radio/data coprocessor so
+NuttX owns DHCP, DNS, sockets, services, diagnostics, and `wlan0`.
+
+To flash the ESP32-C6, temporarily flash Adafruit's SerialESPPassthrough UF2 to
+the RP2350, then use `esptool`:
+
+```sh
+python3 -m esptool --chip esp32c6 --before no_reset --after no_reset \
+  -p /dev/cu.usbmodem<PASSTHROUGH> -b 115200 \
+  write_flash 0 fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin
+```
+
+Then put the RP2350 back into BOOTSEL and flash the FruitClaw UF2.
+
+To revert the coprocessor, follow Adafruit's AirLift firmware guide and flash
+the current `NINA_ADAFRUIT-fruitjam_c6-<version>.bin`.
+
+## Documentation Locations
+
+More detail lives in the source tree:
+
+- FruitClaw app manual:
+  `apps/system/fruitclaw/README.md`
+- Browser wiki served by the embedded webserver:
+  `apps/examples/webserver/httpd-fs/wiki/`
+- Fruit Jam board notes:
+  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/README.md`
+- PSRAM notes:
+  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/PSRAM.md`
+- TRMNL/HSTX timing notes:
+  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/TRMNL_DVI_TIMING.md`
+- ESP-Hosted board notes:
+  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/ESP_HOSTED.md`
+
+## Known Alpha Gaps
+
+- Telegram and DeepSeek need runtime credentials before end-to-end chat works.
+- TLS is allowed unverified for bring-up unless CA roots are installed.
+- SD must be mounted for persistent `/mnt/sd0/fruitclaw`; otherwise the board
+  falls back to `/data/fruitclaw`.
+- MCP is intentionally dangerous YOLO mode in this preview.
+- Local graphical UI polish is still future work; the current web UI is static
+  docs and the board display profile is the safe 320x240 RGB565 DVI mode.
+- The 10-minute BOOTSEL max-uptime guard is a development setting, not a
+  production default.
