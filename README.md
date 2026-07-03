@@ -99,7 +99,13 @@ Open the USB console:
 ```sh
 ls /dev/cu.usbmodem*
 screen /dev/cu.usbmodem01 115200
+# or: tio /dev/cu.usbmodem01
 ```
+
+The production profile leaves NSH echoback enabled, so a default terminal
+session should show typed characters and clean line returns. If an older alpha
+image hides typing or repeats prompts on one line, rebuild with
+`CONFIG_NSH_DISABLE_ECHOBACK` unset.
 
 Useful first commands:
 
@@ -142,12 +148,13 @@ FruitClaw data root or through the `web.home.write` MCP/agent tool.
 The full browser manual is:
 
 ```text
-http://<board-ip>/doc/
+http://<board-ip>/docs/
 ```
 
-The `/doc/` manual is also Water.css themed. It is split into small Markdown
+The `/docs/` manual is also Water.css themed. It is split into small Markdown
 pages so the microcontroller only serves static files and the browser renders
-Markdown client-side with Marked and DOMPurify.
+Markdown client-side with Marked and DOMPurify. `/doc/` is kept as a small
+compatibility redirect.
 
 The MCP endpoint is:
 
@@ -195,6 +202,15 @@ fruitclaw config
 fruitclaw wifi-up
 ifconfig wlan0
 ping -c 3 1.1.1.1
+```
+
+On boot, FruitClaw looks for Wi-Fi credentials in this order:
+
+```text
+CONFIG_FRUITCLAW_WIFI_CONFIG_PATH, when set to an absolute path
+<active-data-root>/wifi.conf
+/mnt/sd0/fruitclaw/wifi.conf
+/data/fruitclaw/wifi.conf
 ```
 
 The profile seeds the known owner chat ID into `telegram_allowed_chats.txt` on
@@ -250,7 +266,7 @@ The `adafruit-fruit-jam-rp2350:esp-hosted` production profile enables:
   hooks, scheduler, memory, sessions, Berry wrapper, service control, web-home
   tools, and hardware tools.
 - uIP webserver on port 80 with a customizable Water.css home page and static
-  Water.css Markdown docs under `/doc/`.
+  Water.css Markdown docs under `/docs/`.
 - MCP Streamable HTTP endpoint at `/mcp`.
 - Telnet server (`telnetd`) and FTP server (`ftpd_start`/`ftpd_stop`) with
   FruitClaw service supervisor support.
@@ -289,8 +305,8 @@ fruitclaw berry-run hello.be
 MCP tools include `system.status`, `system.info`, `time.now`, `terminal.run`,
 `device.list`, `device.read`, `device.write`, `neopixels.set`,
 `neopixels.effect`, `scheduler.add`, `scheduler.list`, `scheduler.remove`,
-`telegram.send_message`, `berry.run_script`, `web.home.read`, and
-`web.home.write`.
+`telegram.send_message`, `berry.run_script`, `script.write`, `script.run`,
+`web.home.read`, and `web.home.write`.
 
 Telegram is text-only in this release. Inbound Telegram messages are accepted
 only from numeric chat IDs listed in `telegram_allowed_chats.txt`.
@@ -428,8 +444,10 @@ More detail lives in the source tree and on the board:
 
 - Browser home page served at `/`:
   `apps/examples/webserver/httpd-fs/index.html`
-- Browser manual served at `/doc/`:
-  `apps/examples/webserver/httpd-fs/doc/`
+- Browser manual served at `/docs/`:
+  `apps/examples/webserver/httpd-fs/docs/`
+- Legacy `/doc/` compatibility redirect:
+  `apps/examples/webserver/httpd-fs/doc/index.html`
 - FruitClaw app manual:
   `apps/system/fruitclaw/README.md`
 - Fruit Jam board notes:
