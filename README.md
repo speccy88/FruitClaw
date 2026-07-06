@@ -65,6 +65,21 @@ Validation for this production release:
 - `device.read` rejects raw block devices before opening them, so MCP/Telegram
   cannot wedge the board by reading `/dev/mmcsd0`.
 
+## Current Source Pins
+
+The wrapper source has been refreshed onto current Apache `master` after the
+production UF2 above was built. The release artifact provenance above remains
+the source of truth for that UF2; rebuild before tagging a new UF2 release.
+
+Current Apache submodule pins:
+
+```text
+nuttx: f27749b1b7339676bde10ec6852c9a7082fbaee3
+apps:  c785d40af7b354a5ee312ad41e174e07875866da
+```
+
+The FruitClaw patch layer applies cleanly to those pins.
+
 ## Production Behavior
 
 FruitClaw is intentionally an owner-mode operator image, not a locked-down
@@ -490,7 +505,7 @@ and the separate TRMNL app. Keep real Wi-Fi, Telegram, DeepSeek, TRMNL, or other
 tokens out of patches, docs, defconfigs, release notes, and artifacts.
 
 When refreshing the patch layer, start from the current working FruitClaw trees,
-export against the Apache base commits listed near the top of this README, and
+export against the Apache submodule pins recorded by the wrapper commit, and
 rerun `scripts/apply-fruitclaw-patches.sh` in a fresh clone before trusting the
 backup.
 

@@ -2037,7 +2037,7 @@ index 000000000..4e4b9214c
 +`apps/system/fruitclaw/caps/fc_caps_builtin.c`.
 diff --git a/examples/webserver/httpd-fs/docs/pages/features.md b/examples/webserver/httpd-fs/docs/pages/features.md
 new file mode 100644
-index 000000000..fa95ec977
+index 000000000..2a4afe4c1
 --- /dev/null
 +++ b/examples/webserver/httpd-fs/docs/pages/features.md
 @@ -0,0 +1,234 @@
@@ -2116,8 +2116,8 @@ index 000000000..fa95ec977
 +```
 +
 +FTP supports the full lifecycle through `ftpd_start` and `ftpd_stop`. Telnet
-+uses NuttX `telnetd`; this build has no `telnetd_stop`, so Telnet stop/restart
-+report unsupported while status, start, enable, and disable remain available.
++uses NuttX `telnetd` with a tmpfs PID file, so `telnetd -k` lets FruitClaw
++stop and restart the NSH Telnet daemon too.
 +Disable state is stored under `services/*.disabled` in the FruitClaw data root.
 +
 +## Storage
@@ -2895,10 +2895,10 @@ index 000000000..4209149e4
 +`nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig`.
 diff --git a/examples/webserver/httpd-fs/docs/pages/tools.md b/examples/webserver/httpd-fs/docs/pages/tools.md
 new file mode 100644
-index 000000000..400fc313e
+index 000000000..450c9589c
 --- /dev/null
 +++ b/examples/webserver/httpd-fs/docs/pages/tools.md
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,195 @@
 +# Tools
 +
 +FruitClaw tools are the actions the board can perform. There are two ways to
@@ -2976,6 +2976,7 @@ index 000000000..400fc313e
 +fruitclaw service stop ftpd
 +fruitclaw service start ftpd
 +fruitclaw service restart ftpd
++fruitclaw service restart telnetd
 +fruitclaw service disable telnetd
 +fruitclaw service enable telnetd
 +```
@@ -2986,9 +2987,9 @@ index 000000000..400fc313e
 +
 +FTP has real `ftpd_start` and `ftpd_stop` commands in this build, so it
 +supports start, stop, restart, enable, and disable. Telnet exposes a normal
-+NSH service through `telnetd`, but this NuttX tree does not provide a
-+`telnetd_stop` command. FruitClaw therefore supports Telnet start, status,
-+enable, and disable; Telnet stop/restart return an explicit unsupported result.
++NSH service through `telnetd` and records the daemon PID in tmpfs, so
++FruitClaw can stop it with `telnetd -k` and restart it through the same
++service controller.
 +
 +## MCP Endpoint
 +
@@ -3381,7 +3382,7 @@ index 000000000..514ca3a4f
 +`nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/ESP_HOSTED.md`.
 diff --git a/examples/webserver/httpd-fs/docs/pages/utilities.md b/examples/webserver/httpd-fs/docs/pages/utilities.md
 new file mode 100644
-index 000000000..85173667f
+index 000000000..12811057c
 --- /dev/null
 +++ b/examples/webserver/httpd-fs/docs/pages/utilities.md
 @@ -0,0 +1,92 @@
@@ -3410,7 +3411,7 @@ index 000000000..85173667f
 +| `fruitclaw config set-secret telegram` | Store the Telegram bot token without printing it. |
 +| `fruitclaw config set-secret deepseek` | Store the DeepSeek API key without printing it. |
 +| `fruitclaw tools` | List registered capability tools. |
-+| `fruitclaw selftest` | Run offline sanity tests for JSON, tools, queues, cron, memory, paths, and mapping logic. |
++| `fruitclaw selftest` | Run offline sanity tests for JSON, tools, queues, cron, memory, paths, scheduled direct tools, and mapping logic. |
 +| `fruitclaw telegram-test` | Send a test Telegram message to the allowed chat. |
 +| `fruitclaw deepseek-test` | Test outbound DeepSeek chat/completions. |
 +| `fruitclaw terminal-run <cmd...>` | Run a bounded NSH command and capture output. |
@@ -3437,7 +3438,7 @@ index 000000000..85173667f
 +| `ntpc` | NTP client. |
 +| `telnetd` | NuttX Telnet NSH service on port 23. |
 +| `ftpd_start` / `ftpd_stop` | FTP daemon lifecycle commands. |
-+| `webserver` | uIP webserver serving `/`, `/docs/index.html`, `/site/home.md`, and `/mcp`; `/doc/index.html` redirects to `/docs/index.html`. |
++| `webserver` | uIP webserver serving `/`, `/docs/`, `/site/home.md`, and `/mcp`; `/doc/` redirects to `/docs/`. |
 +| `mqttc` | MQTT-C example support. |
 +| `esphostedctl` | ESP-Hosted control/diagnostic utility. |
 +
@@ -4664,10 +4665,10 @@ index e9dc61f75..d3386ee71 100644
  uint16_t httpd_fs_count(FAR char *name);
  #endif
 diff --git a/interpreters/berry/0001-Fix-Berry-default-port-for-NuttX.patch b/interpreters/berry/0001-Fix-Berry-default-port-for-NuttX.patch
-index 39fc4972e..a9108da82 100644
+index 5e720d07d..a9108da82 100644
 --- a/interpreters/berry/0001-Fix-Berry-default-port-for-NuttX.patch
 +++ b/interpreters/berry/0001-Fix-Berry-default-port-for-NuttX.patch
-@@ -1,27 +1,66 @@
+@@ -1,57 +1,66 @@
 +diff --git a/default/be_modtab.c b/default/be_modtab.c
 +--- a/default/be_modtab.c
 ++++ b/default/be_modtab.c
@@ -4683,10 +4684,62 @@ index 39fc4972e..a9108da82 100644
 ++    &be_native_module(lv),
 ++#endif
  diff --git a/default/berry.c b/default/berry.c
--index d6ea5d1..bb95fc7 100644
+-index 203773f..0df2a99 100644
  --- a/default/berry.c
  +++ b/default/berry.c
--@@ -22 +22,3 @@
+-@@ -19,7 +19,9 @@
+- #endif
+- 
+- /* detect operating system name */
+--#if defined(__linux)
+-+#if defined(__NuttX__)
+-+    #define OS_NAME   "NuttX"
+-+#elif defined(__linux)
+-     #define OS_NAME   "Linux"
+- #elif defined(__unix)
+-     #define OS_NAME   "Unix"
+-@@ -98,7 +100,7 @@
+- struct arg_opts {
+-     int idx;
+-     const char *pattern;
+--    const char *optarg;
+-+    const char *optvalue;
+-     const char *errarg;
+-     const char *src;
+-     const char *dst;
+-@@ -143,10 +145,10 @@ static int arg_getopt(struct arg_opts *opt, int argc, char *argv[])
+-             /* the '?' indicates an optional argument after the option */
+-             if (++opt->idx < argc && res != NULL
+-                 && res[1] == '?' && *argv[opt->idx] != '-') {
+--                opt->optarg = argv[opt->idx++]; /* save the argument */
+-+                opt->optvalue = argv[opt->idx++]; /* save the argument */
+-                 return *res;
+-             }
+--            opt->optarg = NULL;
+-+            opt->optvalue = NULL;
+-             opt->errarg = arg;
+-             return res != NULL ? *res : '?';
+-         }
+-@@ -267,16 +269,16 @@ static int parse_arg(struct arg_opts *opt, int argc, char *argv[])
+-         case 's': args |= arg_s; break;
+-         case 'm':
+-             args |= arg_m;
+--            opt->modulepath = opt->optarg;
+-+            opt->modulepath = opt->optvalue;
+-             break;
+-         case '?': return args | arg_err;
+-         case 'c':
+-             args |= arg_c;
+--            opt->src = opt->optarg;
+-+            opt->src = opt->optvalue;
+-             break;
+-         case 'o':
+-             args |= arg_o;
+--            opt->dst = opt->optarg;
+-+            opt->dst = opt->optvalue;
+-             break;
+-         default:
+-             break;
 +@@ -10,0 +11 @@
 ++#include <nuttx/config.h>
 +@@ -13,0 +15,4 @@
@@ -4695,34 +4748,28 @@ index 39fc4972e..a9108da82 100644
 ++extern void be_lvgl_cleanup(bvm *vm);
 ++#endif
 +@@ -22 +27,3 @@
- -#if defined(__linux)
- +#if defined(__NuttX__)
- +    #define OS_NAME   "NuttX"
- +#elif defined(__linux)
--@@ -103 +105 @@
++-#if defined(__linux)
+++#if defined(__NuttX__)
+++    #define OS_NAME   "NuttX"
+++#elif defined(__linux)
 +@@ -101 +108 @@
- -    const char *optarg;
- +    const char *optvalue;
--@@ -148 +150 @@
++-    const char *optarg;
+++    const char *optvalue;
 +@@ -146 +153 @@
- -                opt->optarg = argv[opt->idx++]; /* save the argument */
- +                opt->optvalue = argv[opt->idx++]; /* save the argument */
--@@ -151 +153 @@
++-                opt->optarg = argv[opt->idx++]; /* save the argument */
+++                opt->optvalue = argv[opt->idx++]; /* save the argument */
 +@@ -149 +156 @@
- -            opt->optarg = NULL;
- +            opt->optvalue = NULL;
--@@ -272 +274 @@
++-            opt->optarg = NULL;
+++            opt->optvalue = NULL;
 +@@ -270 +277 @@
- -            opt->modulepath = opt->optarg;
- +            opt->modulepath = opt->optvalue;
--@@ -277 +279 @@
++-            opt->modulepath = opt->optarg;
+++            opt->modulepath = opt->optvalue;
 +@@ -275 +282 @@
- -            opt->src = opt->optarg;
- +            opt->src = opt->optvalue;
--@@ -281 +283 @@
++-            opt->src = opt->optarg;
+++            opt->src = opt->optvalue;
 +@@ -279 +286 @@
- -            opt->dst = opt->optarg;
- +            opt->dst = opt->optvalue;
++-            opt->dst = opt->optarg;
+++            opt->dst = opt->optvalue;
 +@@ -333,0 +341,10 @@
 ++
 ++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL_GLOBAL
@@ -4743,7 +4790,7 @@ index 39fc4972e..a9108da82 100644
 ++    be_lvgl_cleanup(vm);
 ++#endif
 diff --git a/interpreters/berry/CMakeLists.txt b/interpreters/berry/CMakeLists.txt
-index 42a37554b..226bb0bed 100644
+index d4749851b..3e1cb6701 100644
 --- a/interpreters/berry/CMakeLists.txt
 +++ b/interpreters/berry/CMakeLists.txt
 @@ -33,7 +33,9 @@ if(CONFIG_INTERPRETERS_BERRY)
@@ -4814,7 +4861,7 @@ index 805c61866..0efd55e4d 100644
 +
  endif # INTERPRETERS_BERRY
 diff --git a/interpreters/berry/Makefile b/interpreters/berry/Makefile
-index 6fd563162..86257f381 100644
+index 510a5e86a..8766aec1e 100644
 --- a/interpreters/berry/Makefile
 +++ b/interpreters/berry/Makefile
 @@ -42,15 +42,23 @@ BERRY_SRCS += be_rangelib.c be_repl.c be_solidifylib.c be_strictlib.c
@@ -4841,7 +4888,7 @@ index 6fd563162..86257f381 100644
  
  CFLAGS += ${INCDIR_PREFIX}$(APPDIR)$(DELIM)interpreters$(DELIM)berry$(DELIM)include
  CFLAGS += ${INCDIR_PREFIX}$(APPDIR)$(DELIM)interpreters$(DELIM)berry$(DELIM)$(BERRY_UNPACK)$(DELIM)src
-@@ -71,6 +79,7 @@ $(BERRY_UNPACK): $(BERRY_ARCHIVE)
+@@ -72,6 +80,7 @@ $(BERRY_UNPACK): $(BERRY_ARCHIVE)
  	$(Q) unzip -q -o $(BERRY_ARCHIVE)
  	$(call DELDIR, $(BERRY_UNPACK))
  	$(Q) mv berry-$(BERRY_COMMIT_ID) $(BERRY_UNPACK)
@@ -10886,10 +10933,10 @@ index 000000000..f96ede00c
 +include $(APPDIR)/Application.mk
 diff --git a/system/fruitclaw/README.md b/system/fruitclaw/README.md
 new file mode 100644
-index 000000000..05d375e6a
+index 000000000..452af7867
 --- /dev/null
 +++ b/system/fruitclaw/README.md
-@@ -0,0 +1,691 @@
+@@ -0,0 +1,685 @@
 +# FruitClaw
 +
 +FruitClaw is a small NuttX-native embedded agent app for the Adafruit Fruit Jam
@@ -10922,7 +10969,7 @@ index 000000000..05d375e6a
 +kconfig-tweak --file .config --enable NETUTILS_HTTPD_CGIPATH
 +kconfig-tweak --file .config --enable NETUTILS_HTTPD_POST
 +kconfig-tweak --file .config --set-val NETUTILS_HTTPD_MAX_BODY 16384
-+kconfig-tweak --file .config --set-val NETUTILS_HTTPD_TIMEOUT 3
++kconfig-tweak --file .config --set-val NETUTILS_HTTPD_TIMEOUT 10
 +kconfig-tweak --file .config --enable FRUITCLAW_ENABLE_SESSION_GUARD
 +kconfig-tweak --file .config --enable FRUITCLAW_BOOT_AUTOSTART
 +kconfig-tweak --file .config --enable FRUITCLAW_WIFI_AUTOSTART
@@ -11105,7 +11152,7 @@ index 000000000..05d375e6a
 +
 +```sh
 +fruitclaw boot
-+fruitclaw wifi-up [--force]
++fruitclaw wifi-up
 +fruitclaw selftest
 +fruitclaw config
 +fruitclaw status
@@ -11132,6 +11179,7 @@ index 000000000..05d375e6a
 +fruitclaw service start ftpd
 +fruitclaw service stop ftpd
 +fruitclaw service restart ftpd
++fruitclaw service restart telnetd
 +fruitclaw service disable telnetd
 +fruitclaw service enable telnetd
 +```
@@ -11145,9 +11193,9 @@ index 000000000..05d375e6a
 +marker under `services/` in the active FruitClaw data root, preventing
 +autostart on later boots without changing the firmware image.  FTP supports
 +start, stop, restart, enable, and disable through the compiled `ftpd_start` and
-+`ftpd_stop` commands.  Telnet uses NuttX `telnetd`; this tree has no
-+`telnetd_stop`, so Telnet stop/restart return an explicit unsupported result
-+while status, start, enable, and disable remain available.
++`ftpd_stop` commands.  Telnet supports the same lifecycle through
++`telnetd -k`, which stops the daemon recorded in the configured Telnet PID
++file before FruitClaw starts it again.
 +
 +Schedules:
 +
@@ -11207,8 +11255,9 @@ index 000000000..05d375e6a
 +As of the current hardware slice, `fruitclaw berry-smoke`,
 +`fruitclaw selftest`, MCP `berry.run_script`, `import claw`, and a Berry script
 +calling back into `terminal.run` have been verified on the Fruit Jam RP2350.
-+The generated `script.run` path is a source-level hardening addition for the
-+next image and still needs the same hardware smoke test. More complex
++The offline selftest now also proves that a scheduled `tool:...` event runs
++directly with the creator's owner chat/session context. The generated
++`script.run` hardware path still needs the same board smoke test. More complex
 +Berry/LVGL integration is still bring-up work.
 +
 +## Recovery Model
@@ -11248,12 +11297,7 @@ index 000000000..05d375e6a
 +`fruitclaw wifi-up` uses the operator/HTTP/CLI guard timeout directly; it must
 +not be stretched to the full session timeout, because a wedged ESP-hosted
 +association or DHCP command would otherwise leave CDC and MCP stale for the
-+whole operator recovery window.  After DHCP, `wifi-up` also checks the live
-+IPv4 address, default gateway, and gateway ICMP replies; command-stage success
-+alone is not treated as working Wi-Fi.  If the cached bring-up state says Wi-Fi
-+was recently successful, FruitClaw verifies that cache before skipping the
-+setup sequence.  If the cache is stale, it reapplies `ifup`, WAPI credentials,
-+ESSID, and DHCP.
++whole operator recovery window.
 +
 +Only one short/long risky-operation guard may own the RP2350 watchdog at a
 +time.  If a Berry/terminal/device/MCP path is already guarded, a second risky
@@ -11322,10 +11366,7 @@ index 000000000..05d375e6a
 +Network recovery is deliberately supervised.  Telegram/network staleness first
 +starts a detached Wi-Fi/service recovery worker; while that worker is active,
 +`fruitclaw status-net` skips live netlib probes so serial NSH stays responsive.
-+Outside that active recovery window, `status-net` prints the live interface
-+flags, IPv4 address, netmask, gateway, gateway ping replies, and a final
-+`result=`/`ret=`.  Use `ping 8.8.8.8` as the final upstream internet proof.  If
-+recovery runs longer than the operator recovery budget, the operator guard
++If recovery runs longer than the operator recovery budget, the operator guard
 +records `FCNR` and hands off to the configured watchdog recovery target instead
 +of leaving the board half-alive with MCP unreachable.
 +
@@ -11505,7 +11546,7 @@ index 000000000..05d375e6a
 +FruitClaw starts it from `wifi-up` so the agent owns the boot order.
 +
 +The FruitClaw profile keeps the uIP webserver bounded with
-+`CONFIG_NETUTILS_HTTPD_TIMEOUT=3`.  FruitClaw also applies that timeout to
++`CONFIG_NETUTILS_HTTPD_TIMEOUT=10`.  FruitClaw also applies that timeout to
 +accepted socket receive and send paths, because a single idle or slow HTTP
 +client must not monopolize the small embedded webserver and starve MCP or the
 +docs.  Telegram gets a separate first-success grace window before network
@@ -11583,10 +11624,10 @@ index 000000000..05d375e6a
 +  production profile so it does not interrupt healthy MCP/Telegram sessions.
 diff --git a/system/fruitclaw/caps/fc_caps_builtin.c b/system/fruitclaw/caps/fc_caps_builtin.c
 new file mode 100644
-index 000000000..bebe6b179
+index 000000000..fd7b2bd4b
 --- /dev/null
 +++ b/system/fruitclaw/caps/fc_caps_builtin.c
-@@ -0,0 +1,3990 @@
+@@ -0,0 +1,3969 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -11601,7 +11642,6 @@ index 000000000..bebe6b179
 +#include <string.h>
 +#include <strings.h>
 +#include <sys/stat.h>
-+#include <sys/wait.h>
 +#include <sys/utsname.h>
 +#include <time.h>
 +#include <unistd.h>
@@ -11664,21 +11704,6 @@ index 000000000..bebe6b179
 +  { "cyan",      0, 255, 255 },
 +  { "pink",    255,  32,  96 }
 +};
-+
-+static int fc_system_exit_code(int status)
-+{
-+  if (status < 0)
-+    {
-+      return status;
-+    }
-+
-+  if (WIFEXITED(status))
-+    {
-+      return WEXITSTATUS(status);
-+    }
-+
-+  return -1;
-+}
 +
 +static bool fc_color_lookup(const char *name, uint8_t *r, uint8_t *g,
 +                            uint8_t *b)
@@ -14449,7 +14474,6 @@ index 000000000..bebe6b179
 +  char *buf;
 +  char *esc;
 +  int volume = CONFIG_SYSTEM_RTTTL_VOLUME;
-+  int exit_code;
 +  int guard_fd = -1;
 +  int sysret;
 +  int ret;
@@ -14533,12 +14557,9 @@ index 000000000..bebe6b179
 +    }
 +
 +  fc_json_escape(buf, esc, FC_TOOL_TEXT_MAX * 6 + 1);
-+  exit_code = fc_system_exit_code(sysret);
 +  snprintf(out, out_len,
-+           "{\"ok\":%s,\"status\":%d,\"exit_code\":%d,"
-+           "\"volume\":%d,\"output\":\"%s\"}",
-+           sysret == 0 ? "true" : "false", sysret, exit_code,
-+           volume, esc);
++           "{\"ok\":%s,\"status\":%d,\"volume\":%d,\"output\":\"%s\"}",
++           sysret == 0 ? "true" : "false", sysret, volume, esc);
 +  free(buf);
 +  free(esc);
 +  return sysret == 0 ? 0 : -EIO;
@@ -15294,8 +15315,7 @@ index 000000000..bebe6b179
 +  {
 +    "service.control", "Control service",
 +    "Start, stop, restart, enable, or disable Telnet/FTP services. Telnet "
-+    "stop/restart reports unsupported on builds without a telnetd stop "
-+    "command.",
++    "stop/restart uses the local telnetd PID file; FTP uses ftpd_stop.",
 +    "{\"type\":\"object\",\"properties\":{\"service\":{\"type\":\"string\","
 +    "\"enum\":[\"telnetd\",\"ftpd\"]},\"action\":{\"type\":\"string\","
 +    "\"enum\":[\"start\",\"stop\",\"restart\",\"enable\",\"disable\"]}},"
@@ -19212,10 +19232,10 @@ index 000000000..24bffa958
 +}
 diff --git a/system/fruitclaw/core/fc_selftest.c b/system/fruitclaw/core/fc_selftest.c
 new file mode 100644
-index 000000000..ed5e71bc3
+index 000000000..f138c70bd
 --- /dev/null
 +++ b/system/fruitclaw/core/fc_selftest.c
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,767 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -19736,6 +19756,47 @@ index 000000000..ed5e71bc3
 +               strstr(status, "scheduler_status:") != NULL &&
 +               strstr(status, "used=") != NULL,
 +               "scheduler status");
++
++  {
++    char session_path[FC_PATH_LEN] = "";
++
++    if (fc_data_path("sessions/selftest-scheduled-tool.jsonl",
++                     session_path, sizeof(session_path)) == 0)
++      {
++        unlink(session_path);
++      }
++
++    memset(&ev, 0, sizeof(ev));
++    fc_strlcpy(ev.source, "scheduler", sizeof(ev.source));
++    fc_strlcpy(ev.type, "timer.fire", sizeof(ev.type));
++    fc_strlcpy(ev.channel, "telegram", sizeof(ev.channel));
++    fc_strlcpy(ev.chat_id, "6216681418", sizeof(ev.chat_id));
++    fc_strlcpy(ev.session_id, "selftest-scheduled-tool",
++               sizeof(ev.session_id));
++    fc_strlcpy(ev.text, "tool:self.owner_fake {\"from\":\"schedule\"}",
++               sizeof(ev.text));
++    ev.owner_mode = true;
++    g_fake_called = 0;
++    memset(&g_fake_last_ctx, 0, sizeof(g_fake_last_ctx));
++    buf[0] = '\0';
++    ret |= check(fc_agent_handle_event(&ev, buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "Scheduled tool self.owner_fake -> ok") !=
++                 NULL &&
++                 g_fake_called == 1 &&
++                 g_fake_last_ctx.owner_mode &&
++                 strcmp(g_fake_last_ctx.source, "scheduler") == 0 &&
++                 strcmp(g_fake_last_ctx.channel, "telegram") == 0 &&
++                 strcmp(g_fake_last_ctx.chat_id, "6216681418") == 0 &&
++                 strcmp(g_fake_last_ctx.session_id,
++                        "selftest-scheduled-tool") == 0,
++                 "scheduler direct owner tool");
++
++    if (session_path[0] != '\0')
++      {
++        unlink(session_path);
++      }
++  }
++
 +  status[0] = '\0';
 +  ret |= check(fc_berry_status_format(status, sizeof(status)) == 0 &&
 +               strstr(status, "berry_status:") != NULL &&
@@ -19944,16 +20005,15 @@ index 000000000..ed5e71bc3
 +}
 diff --git a/system/fruitclaw/fruitclaw_main.c b/system/fruitclaw/fruitclaw_main.c
 new file mode 100644
-index 000000000..119e171f1
+index 000000000..e3d72f721
 --- /dev/null
 +++ b/system/fruitclaw/fruitclaw_main.c
-@@ -0,0 +1,4614 @@
+@@ -0,0 +1,4553 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
 +
 +#include <ctype.h>
-+#include <dirent.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <arpa/inet.h>
@@ -19982,8 +20042,6 @@ index 000000000..119e171f1
 +#define FC_WIFI_SSID_LEN 64
 +#define FC_WIFI_PSK_LEN 96
 +#define FC_WIFI_REAPPLY_SUPPRESS_MS 300000
-+#define FC_WIFI_PROBE_TIMEOUT_MS 1500
-+#define FC_WIFI_PROBE_RETRIES 2
 +#define FC_SERVICE_BOOT_RETRIES 3
 +#define FC_SERVICE_BOOT_RETRY_DELAY_SEC 3
 +#define FC_SERVICE_PROBE_FAILURE_LIMIT 3
@@ -20000,10 +20058,6 @@ index 000000000..119e171f1
 +
 +#ifndef CONFIG_EXAMPLES_FTPD_PORT
 +#  define CONFIG_EXAMPLES_FTPD_PORT 21
-+#endif
-+
-+#ifndef CONFIG_NSH_PROC_MOUNTPOINT
-+#  define CONFIG_NSH_PROC_MOUNTPOINT "/proc"
 +#endif
 +
 +static pthread_mutex_t g_bootstrap_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -20060,6 +20114,26 @@ index 000000000..119e171f1
 +static int64_t g_ftpd_last_ms;
 +static int64_t g_services_probe_ms;
 +
++#ifdef CONFIG_FRUITCLAW_ENABLE_SESSION_GUARD
++static void fc_boot_require_network_or_recover(int ret, const char *stage)
++{
++  if (ret == 0)
++    {
++      return;
++    }
++
++  FC_LOGE("boot network stage %s failed ret=%d; resetting into app",
++          stage ? stage : "unknown", ret);
++  fc_guard_force_recovery(FC_GUARD_STAGE_NETREC);
++}
++#else
++static void fc_boot_require_network_or_recover(int ret, const char *stage)
++{
++  (void)ret;
++  (void)stage;
++}
++#endif
++
 +enum fc_service_id_e
 +{
 +  FC_SERVICE_TELNETD = 0,
@@ -20073,23 +20147,10 @@ index 000000000..119e171f1
 +                                       int64_t poll_age_ms);
 +static int fc_services_supervisor_start(void);
 +static void *fc_services_supervisor_main(void *arg);
-+static const char *fc_service_name(enum fc_service_id_e id);
-+static bool fc_service_autostart_enabled(enum fc_service_id_e id);
 +static bool fc_service_started_snapshot(enum fc_service_id_e id);
-+static int fc_service_start_id(enum fc_service_id_e id);
 +#ifdef CONFIG_FRUITCLAW_BOOT_START_WEBSERVER
 +static void *fc_webserver_supervisor_main(void *arg);
 +#endif
-+
-+static void fc_boot_note_network_failure(int ret, const char *stage)
-+{
-+  if (ret != 0)
-+    {
-+      FC_LOGW("boot %s failed: %d; continuing with local console",
-+              stage != NULL ? stage : "network", ret);
-+      fc_guard_session_heartbeat(stage != NULL ? stage : "network-failed");
-+    }
-+}
 +
 +static void usage(void)
 +{
@@ -20100,7 +20161,7 @@ index 000000000..119e171f1
 +  printf("  fruitclaw status-net\n");
 +  printf("  fruitclaw reboot\n");
 +  printf("  fruitclaw recover\n");
-+  printf("  fruitclaw wifi-up [--force]\n");
++  printf("  fruitclaw wifi-up\n");
 +  printf("  fruitclaw service status [telnetd|ftpd]\n");
 +  printf("  fruitclaw service <start|stop|restart|enable|disable> "
 +         "<telnetd|ftpd>\n");
@@ -20204,6 +20265,20 @@ index 000000000..119e171f1
 +  out[off++] = '"';
 +  out[off] = '\0';
 +  return 0;
++}
++
++static void print_guard_status(char *status)
++{
++  char *saveptr = NULL;
++  char *field;
++
++  printf("  guard_status:\n");
++  for (field = strtok_r(status, " ", &saveptr);
++       field != NULL;
++       field = strtok_r(NULL, " ", &saveptr))
++    {
++      printf("    %s\n", field);
++    }
 +}
 +
 +static int boot_run_command_guarded(const char *label, const char *cmd,
@@ -20375,10 +20450,10 @@ index 000000000..119e171f1
 +  char path[FC_PATH_LEN];
 +  int ret;
 +
-+  ret = fc_data_path(CONFIG_FRUITCLAW_WIFI_CONFIG_LEAF, path, sizeof(path));
-+  if (ret == 0)
++  if (CONFIG_FRUITCLAW_WIFI_CONFIG_PATH[0] == '/')
 +    {
-+      ret = wifi_try_config_path(path, ssid, ssid_len, psk, psk_len,
++      ret = wifi_try_config_path(CONFIG_FRUITCLAW_WIFI_CONFIG_PATH,
++                                 ssid, ssid_len, psk, psk_len,
 +                                 key_mgmt, cipher, used_path,
 +                                 used_path_len);
 +      if (ret == 0)
@@ -20387,10 +20462,10 @@ index 000000000..119e171f1
 +        }
 +    }
 +
-+  if (CONFIG_FRUITCLAW_WIFI_CONFIG_PATH[0] == '/')
++  ret = fc_data_path(CONFIG_FRUITCLAW_WIFI_CONFIG_LEAF, path, sizeof(path));
++  if (ret == 0)
 +    {
-+      ret = wifi_try_config_path(CONFIG_FRUITCLAW_WIFI_CONFIG_PATH,
-+                                 ssid, ssid_len, psk, psk_len,
++      ret = wifi_try_config_path(path, ssid, ssid_len, psk, psk_len,
 +                                 key_mgmt, cipher, used_path,
 +                                 used_path_len);
 +      if (ret == 0)
@@ -20421,6 +20496,48 @@ index 000000000..119e171f1
 +                              key_mgmt, cipher, used_path, used_path_len);
 +}
 +
++static bool wifi_path_present(const char *path)
++{
++  return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
++}
++
++static bool wifi_config_present(void)
++{
++#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
++  char path[FC_PATH_LEN];
++
++  if (CONFIG_FRUITCLAW_WIFI_CONFIG_PATH[0] == '/' &&
++      wifi_path_present(CONFIG_FRUITCLAW_WIFI_CONFIG_PATH))
++    {
++      return true;
++    }
++
++  if (fc_data_path(CONFIG_FRUITCLAW_WIFI_CONFIG_LEAF, path,
++                   sizeof(path)) == 0 && wifi_path_present(path))
++    {
++      return true;
++    }
++
++  if (snprintf(path, sizeof(path), "%s/%s", CONFIG_FRUITCLAW_SD_DATA_DIR,
++               CONFIG_FRUITCLAW_WIFI_CONFIG_LEAF) < (int)sizeof(path) &&
++      wifi_path_present(path))
++    {
++      return true;
++    }
++
++  if (snprintf(path, sizeof(path), "%s/%s", CONFIG_FRUITCLAW_DATA_DIR,
++               CONFIG_FRUITCLAW_WIFI_CONFIG_LEAF) < (int)sizeof(path) &&
++      wifi_path_present(path))
++    {
++      return true;
++    }
++
++  return false;
++#else
++  return false;
++#endif
++}
++
 +static uint32_t fc_wifi_guard_timeout_ms(void)
 +{
 +  uint32_t timeout_ms;
@@ -20436,139 +20553,6 @@ index 000000000..119e171f1
 +  return timeout_ms;
 +}
 +
-+#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
-+struct fc_wifi_probe_s
-+{
-+  struct in_addr ipaddr;
-+  struct in_addr netmask;
-+  struct in_addr gateway;
-+  char ip[INET_ADDRSTRLEN];
-+  char mask[INET_ADDRSTRLEN];
-+  char gw[INET_ADDRSTRLEN];
-+  uint8_t flags;
-+  int flags_ret;
-+  int ip_ret;
-+  int mask_ret;
-+  int gw_ret;
-+  int gw_replies;
-+};
-+
-+static bool fc_wifi_ipv4_usable(int ret, const struct in_addr *addr)
-+{
-+  return ret == 0 && addr != NULL && addr->s_addr != INADDR_ANY;
-+}
-+
-+static void fc_wifi_ipv4_string(int ret, const struct in_addr *addr,
-+                                char *out, size_t out_len)
-+{
-+  if (out == NULL || out_len == 0)
-+    {
-+      return;
-+    }
-+
-+  if (ret < 0 || addr == NULL)
-+    {
-+      snprintf(out, out_len, "err:%d", ret);
-+      return;
-+    }
-+
-+  if (inet_ntop(AF_INET, addr, out, out_len) == NULL)
-+    {
-+      snprintf(out, out_len, "err:%d", errno);
-+    }
-+}
-+
-+static int fc_wifi_probe(struct fc_wifi_probe_s *probe, bool ping_gateway)
-+{
-+  int ret = 0;
-+
-+  if (probe == NULL)
-+    {
-+      return -EINVAL;
-+    }
-+
-+  memset(probe, 0, sizeof(*probe));
-+  probe->gw_replies = -1;
-+
-+  probe->flags_ret = netlib_getifstatus(CONFIG_FRUITCLAW_WIFI_IFNAME,
-+                                        &probe->flags);
-+  probe->ip_ret = netlib_get_ipv4addr(CONFIG_FRUITCLAW_WIFI_IFNAME,
-+                                      &probe->ipaddr);
-+  probe->mask_ret = netlib_get_ipv4netmask(CONFIG_FRUITCLAW_WIFI_IFNAME,
-+                                           &probe->netmask);
-+  probe->gw_ret = netlib_get_dripv4addr(CONFIG_FRUITCLAW_WIFI_IFNAME,
-+                                        &probe->gateway);
-+
-+  fc_wifi_ipv4_string(probe->ip_ret, &probe->ipaddr,
-+                      probe->ip, sizeof(probe->ip));
-+  fc_wifi_ipv4_string(probe->mask_ret, &probe->netmask,
-+                      probe->mask, sizeof(probe->mask));
-+  fc_wifi_ipv4_string(probe->gw_ret, &probe->gateway,
-+                      probe->gw, sizeof(probe->gw));
-+
-+  if (probe->flags_ret < 0)
-+    {
-+      ret = -ENODEV;
-+    }
-+  else if ((probe->flags & IFF_UP) == 0)
-+    {
-+      ret = -ENETDOWN;
-+    }
-+  else if ((probe->flags & IFF_RUNNING) == 0)
-+    {
-+      ret = -ENOTCONN;
-+    }
-+  else if (!fc_wifi_ipv4_usable(probe->ip_ret, &probe->ipaddr))
-+    {
-+      ret = -EADDRNOTAVAIL;
-+    }
-+  else if (!fc_wifi_ipv4_usable(probe->gw_ret, &probe->gateway))
-+    {
-+      ret = -EHOSTUNREACH;
-+    }
-+
-+  if (ret == 0 && ping_gateway)
-+    {
-+      probe->gw_replies =
-+        netlib_check_ifconnectivity(CONFIG_FRUITCLAW_WIFI_IFNAME,
-+                                    FC_WIFI_PROBE_TIMEOUT_MS,
-+                                    FC_WIFI_PROBE_RETRIES);
-+      if (probe->gw_replies <= 0)
-+        {
-+          ret = -ENETUNREACH;
-+        }
-+    }
-+
-+  return ret;
-+}
-+
-+static void fc_wifi_print_probe(const char *prefix,
-+                                const struct fc_wifi_probe_s *probe,
-+                                int ret)
-+{
-+  if (prefix == NULL)
-+    {
-+      prefix = "Wi-Fi";
-+    }
-+
-+  printf("%s if=%s flags_ret=%d flags=0x%02x up=%s running=%s "
-+         "ip=%s netmask=%s gateway=%s gateway_replies=%d result=%s ret=%d\n",
-+         prefix,
-+         CONFIG_FRUITCLAW_WIFI_IFNAME,
-+         probe->flags_ret,
-+         probe->flags,
-+         (probe->flags_ret == 0 && (probe->flags & IFF_UP)) ? "yes" : "no",
-+         (probe->flags_ret == 0 && (probe->flags & IFF_RUNNING)) ? "yes" :
-+                                                                    "no",
-+         probe->ip,
-+         probe->mask,
-+         probe->gw,
-+         probe->gw_replies,
-+         ret == 0 ? "ok" : "failed",
-+         ret);
-+}
-+#endif
-+
 +static int wifi_apply_config_once(const char *qssid, const char *qpsk,
 +                                  bool use_psk, int key_mgmt, int cipher,
 +                                  fc_guard_long_t *guard)
@@ -20577,12 +20561,8 @@ index 000000000..119e171f1
 +  int ret;
 +
 +  snprintf(cmd, sizeof(cmd), "ifup %s", CONFIG_FRUITCLAW_WIFI_IFNAME);
-+  ret = boot_run_command_guarded("wifi-ifup", cmd, true, guard,
-+                                 FC_GUARD_STAGE_WIFI_IFUP);
-+  if (ret < 0)
-+    {
-+      return ret;
-+    }
++  boot_run_command_guarded("wifi-ifup", cmd, false, guard,
++                           FC_GUARD_STAGE_WIFI_IFUP);
 +
 +  if (use_psk)
 +    {
@@ -20656,7 +20636,7 @@ index 000000000..119e171f1
 +  return ret;
 +}
 +
-+static int cmd_wifi_up_guarded(bool already_guarded, bool force)
++static int cmd_wifi_up_guarded(bool already_guarded)
 +{
 +#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
 +  char ssid[FC_WIFI_SSID_LEN];
@@ -20667,7 +20647,6 @@ index 000000000..119e171f1
 +  int key_mgmt;
 +  int cipher;
 +  fc_guard_long_t guard;
-+  struct fc_wifi_probe_s probe;
 +  bool guarded = false;
 +  bool wifi_locked = false;
 +  int ret;
@@ -20734,21 +20713,12 @@ index 000000000..119e171f1
 +
 +  wifi_locked = true;
 +
-+  if (!force &&
-+      g_wifi_last_ok_ms > 0 &&
++  if (g_wifi_last_ok_ms > 0 &&
 +      fc_mono_ms() - g_wifi_last_ok_ms < FC_WIFI_REAPPLY_SUPPRESS_MS)
 +    {
-+      ret = fc_wifi_probe(&probe, true);
-+      fc_wifi_print_probe("Wi-Fi cached verify:", &probe, ret);
-+      if (ret == 0)
-+        {
-+          printf("Wi-Fi bring-up skipped: recent verified success; "
-+                 "use 'fruitclaw wifi-up --force' to reapply\n");
-+          goto out;
-+        }
-+
-+      printf("Wi-Fi cached success is stale; reapplying config\n");
-+      g_wifi_last_ok_ms = 0;
++      printf("Wi-Fi bring-up skipped: recent success\n");
++      ret = 0;
++      goto out;
 +    }
 +
 +  if (!already_guarded)
@@ -20784,23 +20754,7 @@ index 000000000..119e171f1
 +                                cipher, guarded ? &guard : NULL);
 +  if (ret == 0)
 +    {
-+      if (guarded)
-+        {
-+          fc_guard_long_set_stage(&guard, FC_GUARD_STAGE_WIFI_DHCP);
-+        }
-+
-+      fc_guard_session_heartbeat("wifi-probe");
-+      ret = fc_wifi_probe(&probe, true);
-+      fc_wifi_print_probe("Wi-Fi verify:", &probe, ret);
-+      if (ret == 0)
-+        {
-+          g_wifi_last_ok_ms = fc_mono_ms();
-+        }
-+      else
-+        {
-+          printf("Wi-Fi command stages completed, but connectivity "
-+                 "verification failed\n");
-+        }
++      g_wifi_last_ok_ms = fc_mono_ms();
 +    }
 +
 +out:
@@ -20826,9 +20780,9 @@ index 000000000..119e171f1
 +#endif
 +}
 +
-+static int cmd_wifi_up(bool force)
++static int cmd_wifi_up(void)
 +{
-+  return cmd_wifi_up_guarded(false, force);
++  return cmd_wifi_up_guarded(false);
 +}
 +
 +static void *fc_boot_network_main(void *arg)
@@ -20846,7 +20800,7 @@ index 000000000..119e171f1
 +        {
 +          FC_LOGD("boot Wi-Fi attempt %d/8", attempt);
 +          fc_operator_progress_mark("wifi-attempt");
-+          ret = cmd_wifi_up(false);
++          ret = cmd_wifi_up();
 +          if (ret == 0)
 +            {
 +              fc_operator_progress_mark("wifi-ready");
@@ -20862,7 +20816,7 @@ index 000000000..119e171f1
 +          FC_LOGW("boot continuing without confirmed Wi-Fi");
 +          fc_operator_progress_mark("wifi-failed");
 +          network_ret = -ENETDOWN;
-+          fc_boot_note_network_failure(network_ret, "wifi");
++          fc_boot_require_network_or_recover(network_ret, "wifi");
 +        }
 +    }
 +#endif
@@ -20912,16 +20866,12 @@ index 000000000..119e171f1
 +        if (attempt < FC_SERVICE_BOOT_RETRIES)
 +          {
 +            sleep(FC_SERVICE_BOOT_RETRY_DELAY_SEC);
-+          }
-+      }
++        }
++    }
 +
 +    if (services_ret != 0)
 +      {
-+        fc_boot_note_network_failure(services_ret, "services");
-+        if (network_ret == 0)
-+          {
-+            network_ret = services_ret;
-+          }
++        fc_boot_require_network_or_recover(services_ret, "services");
 +      }
 +  }
 +
@@ -20966,6 +20916,16 @@ index 000000000..119e171f1
 +  return 0;
 +}
 +
++static bool fc_boot_network_active_snapshot(void)
++{
++  bool active;
++
++  pthread_mutex_lock(&g_boot_network_lock);
++  active = g_boot_network_started && !g_boot_network_done;
++  pthread_mutex_unlock(&g_boot_network_lock);
++  return active;
++}
++
 +static void fc_boot_network_status_snapshot(bool *started, bool *done,
 +                                            bool *ok)
 +{
@@ -20986,16 +20946,6 @@ index 000000000..119e171f1
 +    }
 +
 +  pthread_mutex_unlock(&g_boot_network_lock);
-+}
-+
-+static bool fc_boot_network_active_snapshot(void)
-+{
-+  bool active;
-+
-+  pthread_mutex_lock(&g_boot_network_lock);
-+  active = g_boot_network_started && !g_boot_network_done;
-+  pthread_mutex_unlock(&g_boot_network_lock);
-+  return active;
 +}
 +
 +static void fc_bootstrap_set_stage(const char *stage, int ret)
@@ -21304,8 +21254,7 @@ index 000000000..119e171f1
 +  return 0;
 +}
 +
-+#if defined(CONFIG_FRUITCLAW_BOOT_START_WEBSERVER) && \
-+    !FC_SERVICE_ACTIVE_TCP_PROBES
++#ifdef CONFIG_FRUITCLAW_BOOT_START_WEBSERVER
 +static int fc_webserver_passive_probe(void)
 +{
 +  bool started;
@@ -21475,7 +21424,7 @@ index 000000000..119e171f1
 +   * becomes stale.
 +   */
 +
-+  ret = cmd_wifi_up_guarded(true, true);
++  ret = cmd_wifi_up_guarded(true);
 +
 +#ifdef CONFIG_FRUITCLAW_BOOT_START_WEBSERVER
 +  {
@@ -22029,13 +21978,6 @@ index 000000000..119e171f1
 +         bootstrap_ready ? "ready" :
 +         bootstrap_busy ? "initializing" : "not ready");
 +  printf("bootstrap_stage: %s ret=%d\n", bootstrap_stage, bootstrap_ret);
-+#ifdef CONFIG_FRUITCLAW_REQUIRE_SD_DATA_DIR
-+  printf("persistent_storage: sd-required (%s)\n",
-+         CONFIG_FRUITCLAW_SD_DATA_DIR);
-+#else
-+  printf("persistent_storage: sd-first (%s); tmpfs fallback %s\n",
-+         CONFIG_FRUITCLAW_SD_DATA_DIR, CONFIG_FRUITCLAW_DATA_DIR);
-+#endif
 +  if (bootstrap_ready)
 +    {
 +      printf("data_dir: %s\n", fc_data_dir());
@@ -22252,17 +22194,12 @@ index 000000000..119e171f1
 +  size_t pos = 0;
 +  bool changed = false;
 +  bool overflow = false;
-+  bool hidden = secret;
 +  bool tty;
 +
 +  if (out == NULL || out_len == 0)
 +    {
 +      return -EINVAL;
 +    }
-+
-+#ifdef CONFIG_FRUITCLAW_VISIBLE_SECRET_INPUT
-+  hidden = false;
-+#endif
 +
 +  tty = isatty(STDIN_FILENO);
 +
@@ -22347,7 +22284,7 @@ index 000000000..119e171f1
 +          if (pos > 0)
 +            {
 +              pos--;
-+              if (tty && !hidden)
++              if (tty && !secret)
 +                {
 +                  write(STDOUT_FILENO, "\b \b", 3);
 +                }
@@ -22359,7 +22296,7 @@ index 000000000..119e171f1
 +      if (pos + 1 < out_len)
 +        {
 +          out[pos++] = ch;
-+          if (tty && !hidden)
++          if (tty && !secret)
 +            {
 +              write(STDOUT_FILENO, &ch, 1);
 +            }
@@ -22704,152 +22641,6 @@ index 000000000..119e171f1
 +  return bad;
 +}
 +
-+static bool fc_proc_entry_is_pid(const char *name)
-+{
-+  if (name == NULL || *name == '\0')
-+    {
-+      return false;
-+    }
-+
-+  while (*name != '\0')
-+    {
-+      if (!isdigit((unsigned char)*name))
-+        {
-+          return false;
-+        }
-+
-+      name++;
-+    }
-+
-+  return true;
-+}
-+
-+static int fc_proc_cmdline_contains(const char *needle)
-+{
-+  DIR *dir;
-+  struct dirent *entry;
-+  char path[FC_PATH_LEN];
-+  char buf[128];
-+  int found = 0;
-+
-+  if (needle == NULL || *needle == '\0')
-+    {
-+      return -EINVAL;
-+    }
-+
-+  dir = opendir(CONFIG_NSH_PROC_MOUNTPOINT);
-+  if (dir == NULL)
-+    {
-+      return -errno;
-+    }
-+
-+  while ((entry = readdir(dir)) != NULL)
-+    {
-+      int fd;
-+      ssize_t n;
-+
-+      if (!fc_proc_entry_is_pid(entry->d_name))
-+        {
-+          continue;
-+        }
-+
-+      snprintf(path, sizeof(path), "%s/%s/cmdline",
-+               CONFIG_NSH_PROC_MOUNTPOINT, entry->d_name);
-+      fd = open(path, O_RDONLY);
-+      if (fd < 0)
-+        {
-+          continue;
-+        }
-+
-+      n = read(fd, buf, sizeof(buf) - 1);
-+      close(fd);
-+      if (n <= 0)
-+        {
-+          continue;
-+        }
-+
-+      buf[n] = '\0';
-+      if (strstr(buf, needle) != NULL)
-+        {
-+          found = 1;
-+          break;
-+        }
-+    }
-+
-+  closedir(dir);
-+  return found ? 0 : -ESRCH;
-+}
-+
-+static int fc_service_liveness_probe(enum fc_service_id_e id)
-+{
-+  if (id == FC_SERVICE_TELNETD)
-+    {
-+      return fc_proc_cmdline_contains(CONFIG_SYSTEM_TELNETD_PROGNAME);
-+    }
-+
-+  return fc_proc_cmdline_contains("FTP_daemon");
-+}
-+
-+static void fc_service_mark_probe_down(enum fc_service_id_e id, int ret)
-+{
-+  pthread_mutex_lock(&g_services_lock);
-+  if (id == FC_SERVICE_TELNETD)
-+    {
-+      g_telnetd_started = false;
-+      g_telnetd_listening = false;
-+      g_telnetd_last_ret = ret;
-+      g_telnetd_last_ms = fc_mono_ms();
-+    }
-+  else
-+    {
-+      g_ftpd_started = false;
-+      g_ftpd_listening = false;
-+      g_ftpd_last_ret = ret;
-+      g_ftpd_last_ms = fc_mono_ms();
-+    }
-+
-+  pthread_mutex_unlock(&g_services_lock);
-+}
-+
-+static void fc_service_note_restart(enum fc_service_id_e id)
-+{
-+  pthread_mutex_lock(&g_services_lock);
-+  if (id == FC_SERVICE_TELNETD)
-+    {
-+      g_telnetd_restarts++;
-+    }
-+  else
-+    {
-+      g_ftpd_restarts++;
-+    }
-+
-+  pthread_mutex_unlock(&g_services_lock);
-+}
-+
-+static void fc_service_restart_after_probe(enum fc_service_id_e id,
-+                                           int probe_ret)
-+{
-+  int ret;
-+
-+  if (probe_ret >= 0 || !fc_service_autostart_enabled(id))
-+    {
-+      return;
-+    }
-+
-+  FC_LOGW("%s probe failed: %d; restarting", fc_service_name(id),
-+          probe_ret);
-+  fc_service_mark_probe_down(id, probe_ret);
-+  ret = fc_service_start_id(id);
-+  if (ret == 0)
-+    {
-+      fc_service_note_restart(id);
-+    }
-+  else
-+    {
-+      FC_LOGW("%s restart failed: %d", fc_service_name(id), ret);
-+    }
-+}
-+
 +static void *fc_services_supervisor_main(void *arg)
 +{
 +  (void)arg;
@@ -22871,12 +22662,14 @@ index 000000000..119e171f1
 +
 +          if (fc_service_started_snapshot(FC_SERVICE_TELNETD))
 +            {
-+              telnet_ret = fc_service_liveness_probe(FC_SERVICE_TELNETD);
++              telnet_ret = fc_local_tcp_probe(CONFIG_SYSTEM_TELNETD_PORT,
++                                              FC_SERVICE_PROBE_TIMEOUT_MS);
 +            }
 +
 +          if (fc_service_started_snapshot(FC_SERVICE_FTPD))
 +            {
-+              ftp_ret = fc_service_liveness_probe(FC_SERVICE_FTPD);
++              ftp_ret = fc_local_tcp_probe(CONFIG_EXAMPLES_FTPD_PORT,
++                                           FC_SERVICE_PROBE_TIMEOUT_MS);
 +            }
 +#else
 +#ifdef CONFIG_FRUITCLAW_BOOT_START_WEBSERVER
@@ -22885,12 +22678,12 @@ index 000000000..119e171f1
 +
 +          if (fc_service_started_snapshot(FC_SERVICE_TELNETD))
 +            {
-+              telnet_ret = fc_service_liveness_probe(FC_SERVICE_TELNETD);
++              telnet_ret = 0;
 +            }
 +
 +          if (fc_service_started_snapshot(FC_SERVICE_FTPD))
 +            {
-+              ftp_ret = fc_service_liveness_probe(FC_SERVICE_FTPD);
++              ftp_ret = 0;
 +            }
 +#endif
 +        }
@@ -22898,22 +22691,10 @@ index 000000000..119e171f1
 +      fc_service_probe_record(http_ret, telnet_ret, ftp_ret);
 +      bad = fc_service_probe_bad_count_update(http_ret, telnet_ret,
 +                                              ftp_ret);
-+      fc_service_restart_after_probe(FC_SERVICE_TELNETD, telnet_ret);
-+      fc_service_restart_after_probe(FC_SERVICE_FTPD, ftp_ret);
 +      if (bad >= FC_SERVICE_PROBE_FAILURE_LIMIT)
 +        {
 +          FC_LOGW("service probe failures=%u http=%d telnet=%d ftp=%d",
 +                  bad, http_ret, telnet_ret, ftp_ret);
-+          if (http_ret < 0)
-+            {
-+              int rec_ret = fc_network_recovery_request("http-probe",
-+                                                        fc_mono_ms(), -1);
-+
-+              if (rec_ret < 0)
-+                {
-+                  FC_LOGW("http recovery request failed: %d", rec_ret);
-+                }
-+            }
 +        }
 +
 +      sleep(30);
@@ -23020,7 +22801,7 @@ index 000000000..119e171f1
 +
 +static bool fc_service_stop_supported(enum fc_service_id_e id)
 +{
-+  return id == FC_SERVICE_FTPD && fc_service_compiled(id);
++  return fc_service_compiled(id);
 +}
 +
 +static int fc_service_disabled_path(enum fc_service_id_e id, char *path,
@@ -23193,7 +22974,12 @@ index 000000000..119e171f1
 +
 +  if (id == FC_SERVICE_TELNETD)
 +    {
-+      return -ENOTSUP;
++      fc_bootstrap_set_stage("telnetd-stop", 0);
++      fc_guard_session_heartbeat("telnetd-stop");
++      ret = system("telnetd -k");
++      ret = ret == 0 ? 0 : -EIO;
++      fc_service_mark_stopped(id, ret);
++      return ret;
 +    }
 +
 +  fc_bootstrap_set_stage("ftpd-stop", 0);
@@ -23219,6 +23005,11 @@ index 000000000..119e171f1
 +    }
 +
 +  ret = fc_service_stop_id(id);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
 +  usleep(200000);
 +  ret = fc_service_start_id(id);
 +  if (ret == 0)
@@ -23400,7 +23191,7 @@ index 000000000..119e171f1
 +           "\"telnetd\":{\"compiled\":%s,\"boot_default\":%s,"
 +           "\"enabled\":%s,\"autostart\":%s,\"started\":%s,"
 +           "\"listening\":%s,\"start_supported\":%s,"
-+           "\"stop_supported\":false,\"attempts\":%lu,"
++           "\"stop_supported\":%s,\"attempts\":%lu,"
 +           "\"restarts\":%lu,\"last_ret\":%d,\"probe_ret\":%d,"
 +           "\"last_age_ms\":%lld},"
 +           "\"ftpd\":{\"compiled\":%s,\"boot_default\":%s,"
@@ -23420,6 +23211,7 @@ index 000000000..119e171f1
 +           telnetd_started ? "true" : "false",
 +           telnetd_listening ? "true" : "false",
 +           fc_service_compiled(FC_SERVICE_TELNETD) ? "true" : "false",
++           fc_service_stop_supported(FC_SERVICE_TELNETD) ? "true" : "false",
 +           telnetd_attempts, telnetd_restarts, telnetd_ret,
 +           telnetd_probe_ret,
 +           telnetd_ms > 0 ? (long long)(now - telnetd_ms) : -1,
@@ -23489,19 +23281,18 @@ index 000000000..119e171f1
 +  else if (strcmp(verb, "stop") == 0)
 +    {
 +      ret = fc_service_stop_id(id);
-+      if (ret == -ENOTSUP && id == FC_SERVICE_TELNETD)
++      if (ret < 0 && id == FC_SERVICE_TELNETD)
 +        {
-+          note = "NuttX telnetd has no stop command in this build; "
-+                 "disable prevents next boot autostart.";
++          note = "telnetd stop uses telnetd -k and requires a live "
++                 "PID file.";
 +        }
 +    }
 +  else if (strcmp(verb, "restart") == 0)
 +    {
 +      ret = fc_service_restart_id(id);
-+      if (ret == -ENOTSUP && id == FC_SERVICE_TELNETD)
++      if (ret < 0 && id == FC_SERVICE_TELNETD)
 +        {
-+          note = "NuttX telnetd cannot be restarted without a reboot in "
-+                 "this build.";
++          note = "telnetd restart uses telnetd -k followed by telnetd -4.";
 +        }
 +    }
 +  else if (strcmp(verb, "enable") == 0)
@@ -23560,14 +23351,79 @@ index 000000000..119e171f1
 +  return 0;
 +}
 +
++static int file_present(const char *leaf)
++{
++  char path[FC_PATH_LEN];
++
++  if (fc_data_path(leaf, path, sizeof(path)) < 0)
++    {
++      return 0;
++    }
++
++  return access(path, F_OK) == 0;
++}
++
++static int secret_present(const char *leaf)
++{
++  char path[FC_PATH_LEN];
++
++  if (fc_secret_path(leaf, path, sizeof(path)) < 0)
++    {
++      return 0;
++    }
++
++  return access(path, F_OK) == 0;
++}
++
 +#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
++static void ipv4_status_string(int ret, const struct in_addr *addr,
++                               char *out, size_t out_len)
++{
++  if (out == NULL || out_len == 0)
++    {
++      return;
++    }
++
++  if (ret < 0 || addr == NULL)
++    {
++      snprintf(out, out_len, "err:%d", ret);
++      return;
++    }
++
++  fc_strlcpy(out, inet_ntoa(*addr), out_len);
++}
++
 +static void print_wifi_runtime_status(void)
 +{
-+  struct fc_wifi_probe_s probe;
++  struct in_addr addr;
++  struct in_addr mask;
++  struct in_addr router;
++  char ip[24];
++  char netmask[24];
++  char gateway[24];
++  uint8_t flags = 0;
++  int flags_ret;
++  int ip_ret;
++  int mask_ret;
++  int router_ret;
 +  int64_t recovery_age;
 +  bool recovery_stale;
-+  int probe_ret;
 +  int lock_ret;
++
++#ifdef CONFIG_FRUITCLAW_ENABLE_TELEGRAM
++    {
++      bool telegram_active = false;
++      int64_t telegram_age = fc_telegram_poll_age_ms(&telegram_active);
++
++      if (telegram_active)
++        {
++          printf("  wifi_status: skipped live netlib probe "
++                 "telegram_poll_active=yes poll_age_ms=%lld\n",
++                 (long long)telegram_age);
++          return;
++        }
++    }
++#endif
 +
 +  if (fc_network_recovery_active_snapshot(&recovery_age, &recovery_stale))
 +    {
@@ -23593,23 +23449,56 @@ index 000000000..119e171f1
 +      return;
 +    }
 +
-+  probe_ret = fc_wifi_probe(&probe, true);
++  flags_ret = netlib_getifstatus(CONFIG_FRUITCLAW_WIFI_IFNAME, &flags);
++  ip_ret = netlib_get_ipv4addr(CONFIG_FRUITCLAW_WIFI_IFNAME, &addr);
++  mask_ret = netlib_get_ipv4netmask(CONFIG_FRUITCLAW_WIFI_IFNAME, &mask);
++  router_ret = netlib_get_dripv4addr(CONFIG_FRUITCLAW_WIFI_IFNAME, &router);
 +  pthread_mutex_unlock(&g_wifi_lock);
 +
-+  fc_wifi_print_probe("  wifi_status:", &probe, probe_ret);
++  ipv4_status_string(ip_ret, &addr, ip, sizeof(ip));
++  ipv4_status_string(mask_ret, &mask, netmask, sizeof(netmask));
++  ipv4_status_string(router_ret, &router, gateway, sizeof(gateway));
++
++  printf("  wifi_status: if=%s flags_ret=%d flags=0x%02x up=%s "
++         "running=%s ip=%s netmask=%s gateway=%s\n",
++         CONFIG_FRUITCLAW_WIFI_IFNAME, flags_ret, flags,
++         (flags_ret == 0 && (flags & IFF_UP)) ? "yes" : "no",
++         (flags_ret == 0 && (flags & IFF_RUNNING)) ? "yes" : "no",
++         ip, netmask, gateway);
 +}
 +#endif
 +
 +static int cmd_status(bool include_net)
 +{
++  char progress[128];
 +  char bootstrap_stage[32];
 +  bool bootstrap_ready;
 +  bool bootstrap_busy;
++  fc_guard_long_t guard;
 +  int bootstrap_ret;
++  int ret;
++
++  ret = fc_cli_guard_begin(include_net ? "status-net" : "status", &guard);
++  if (ret < 0)
++    {
++      return 1;
++    }
 +
 +  fc_bootstrap_probe(&bootstrap_ready, &bootstrap_busy);
 +  fc_bootstrap_get_stage(bootstrap_stage, sizeof(bootstrap_stage),
 +                         &bootstrap_ret);
++  if (!bootstrap_ready && !bootstrap_busy)
++    {
++      ret = fc_bootstrap();
++      if (ret < 0)
++        {
++          return fc_cli_guard_end(&guard, 1);
++        }
++
++      bootstrap_ready = true;
++      fc_bootstrap_get_stage(bootstrap_stage, sizeof(bootstrap_stage),
++                             &bootstrap_ret);
++    }
 +
 +  printf("FruitClaw status\n");
 +  printf("  bootstrap: %s\n",
@@ -23634,31 +23523,6 @@ index 000000000..119e171f1
 +         "disabled"
 +#endif
 +         );
-+  if (!bootstrap_ready)
-+    {
-+      printf("  wifi_autostart: %s (startup pending)\n",
-+#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
-+             "enabled"
-+#else
-+             "disabled"
-+#endif
-+             );
-+      goto cached_status;
-+    }
-+
-+  printf("  wifi_autostart: %s",
-+#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
-+         "enabled"
-+#else
-+         "disabled"
-+#endif
-+         );
-+#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
-+  printf(" (%s, %s, config check skipped)",
-+         CONFIG_FRUITCLAW_WIFI_IFNAME, CONFIG_FRUITCLAW_WIFI_CONFIG_PATH);
-+#endif
-+  printf("\n");
-+#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
 +    {
 +      bool boot_started;
 +      bool boot_done;
@@ -23670,7 +23534,42 @@ index 000000000..119e171f1
 +             boot_done ? "yes" : "no",
 +             boot_ok ? "yes" : "no");
 +    }
++  if (!bootstrap_ready)
++    {
++      printf("  wifi_autostart: %s (startup pending)\n",
++#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
++             "enabled"
++#else
++             "disabled"
++#endif
++             );
++        {
++          char status_guard[768];
 +
++          if (fc_guard_status(status_guard, sizeof(status_guard)) == 0)
++            {
++              print_guard_status(status_guard);
++            }
++        }
++
++      return fc_cli_guard_end(&guard, 0);
++    }
++
++  printf("  wifi_autostart: %s",
++#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
++  printf(" (%s, %s, %s)", CONFIG_FRUITCLAW_WIFI_IFNAME,
++         CONFIG_FRUITCLAW_WIFI_CONFIG_PATH,
++         wifi_config_present() ?
++         "config present" : "config missing");
++#endif
++  printf("\n");
++#ifdef CONFIG_FRUITCLAW_WIFI_AUTOSTART
 +  if (include_net)
 +    {
 +      print_wifi_runtime_status();
@@ -23681,55 +23580,98 @@ index 000000000..119e171f1
 +             "live netlib status\n");
 +    }
 +#endif
++  printf("  telegram_token: %s\n",
++         secret_present("telegram_token") ? "present" : "missing");
++  printf("  deepseek_key: %s\n",
++         secret_present("deepseek_api_key") ? "present" : "missing");
++  printf("  allowed_chats: %s\n",
++         file_present("telegram_allowed_chats.txt") ? "present" :
++         "missing");
++  printf("  schedules_file: %s\n",
++         file_present("schedules.json") ? "present" : "missing");
++  fc_operator_progress_mark("status");
++  if (fc_operator_progress_status_format(progress, sizeof(progress)) == 0)
++    {
++      printf("  %s\n", progress);
++    }
 +
-+cached_status:
-+  printf("  services: %s\n",
-+         bootstrap_ready ? "started by boot task; use mcp/status commands "
-+                           "for detail" : "pending bootstrap");
-+  printf("  features: telegram=%s deepseek=%s scheduler=%s berry=%s "
-+         "terminal=%s neopixels=%s device_tools=%s mcp=%s\n",
++  printf("  queues: main=%u agent=%u\n",
++         fc_queue_count(fc_main_queue()), fc_queue_count(fc_agent_queue()));
++  fc_router_status(stdout);
++  fc_agent_status(stdout);
++    {
++      char recovery[256];
++      char webserver[256];
++      char services[256];
++
++      if (fc_network_recovery_status_format(recovery, sizeof(recovery)) == 0)
++        {
++          printf("  %s\n", recovery);
++        }
++
++      if (fc_webserver_status_format(webserver, sizeof(webserver)) == 0)
++        {
++          printf("  %s\n", webserver);
++        }
++
++      if (fc_services_status_format(services, sizeof(services)) == 0)
++        {
++          printf("  %s\n", services);
++        }
++    }
++  printf("  telegram: %s\n",
 +#ifdef CONFIG_FRUITCLAW_ENABLE_TELEGRAM
-+         "on",
++         "enabled"
 +#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_ENABLE_DEEPSEEK
-+         "on",
-+#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_ENABLE_SCHEDULER
-+         "on",
-+#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_ENABLE_BERRY
-+         "on",
-+#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_ENABLE_TERMINAL_TOOL
-+         "on",
-+#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_ENABLE_NEOPIXELS_TOOL
-+         "on",
-+#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_ENABLE_DEVICE_TOOL
-+         "on",
-+#else
-+         "off",
-+#endif
-+#ifdef CONFIG_FRUITCLAW_MCP_SERVER
-+         "on"
-+#else
-+         "off"
++         "disabled"
 +#endif
 +         );
-+  printf("  neopixels_dev: %s\n", CONFIG_SYSTEM_NEOPIXELS_DEVPATH);
++  fc_telegram_status(stdout);
++  printf("  deepseek: %s\n",
++#ifdef CONFIG_FRUITCLAW_ENABLE_DEEPSEEK
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++  fc_deepseek_status(stdout);
++  printf("  scheduler: %s\n",
++#ifdef CONFIG_FRUITCLAW_ENABLE_SCHEDULER
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++  fc_scheduler_status(stdout);
++  printf("  berry: %s\n",
++#ifdef CONFIG_FRUITCLAW_ENABLE_BERRY
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++  fc_berry_status(stdout);
++  printf("  terminal_tool: %s\n",
++#ifdef CONFIG_FRUITCLAW_ENABLE_TERMINAL_TOOL
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++  printf("  neopixels: %s (%s)\n",
++#ifdef CONFIG_FRUITCLAW_ENABLE_NEOPIXELS_TOOL
++         "enabled",
++#else
++         "disabled",
++#endif
++         CONFIG_SYSTEM_NEOPIXELS_DEVPATH);
++  printf("  device_tools: %s\n",
++#ifdef CONFIG_FRUITCLAW_ENABLE_DEVICE_TOOL
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
 +  printf("  exec_guard: %s",
 +#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
 +         "enabled"
@@ -23743,13 +23685,67 @@ index 000000000..119e171f1
 +         CONFIG_FRUITCLAW_GUARD_TIMEOUT_MS);
 +#endif
 +  printf("\n");
-+  printf("  recovery_target: %s\n",
-+#ifdef CONFIG_FRUITCLAW_GUARD_BOOTSEL_RECOVERY
-+         "bootsel"
++  printf("  llm_guard: %s",
++#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
++         "enabled"
 +#else
-+         "reset"
++         "disabled"
 +#endif
 +         );
++#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
++  printf(" (%u ms)", (unsigned int)CONFIG_FRUITCLAW_LLM_GUARD_TIMEOUT_MS);
++#endif
++  printf("\n");
++  printf("  agent_guard: %s",
++#if defined(CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD) && \
++    CONFIG_FRUITCLAW_AGENT_GUARD_TIMEOUT_MS > 0
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++#if defined(CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD) && \
++    CONFIG_FRUITCLAW_AGENT_GUARD_TIMEOUT_MS > 0
++  printf(" (%u ms)",
++         (unsigned int)CONFIG_FRUITCLAW_AGENT_GUARD_TIMEOUT_MS);
++#endif
++  printf("\n");
++  printf("  operator_guard: %s",
++#if defined(CONFIG_FRUITCLAW_ENABLE_SESSION_GUARD) && \
++    CONFIG_FRUITCLAW_OPERATOR_GUARD_TIMEOUT_MS > 0
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++#if defined(CONFIG_FRUITCLAW_ENABLE_SESSION_GUARD) && \
++    CONFIG_FRUITCLAW_OPERATOR_GUARD_TIMEOUT_MS > 0
++  printf(" (%u ms)",
++         (unsigned int)CONFIG_FRUITCLAW_OPERATOR_GUARD_TIMEOUT_MS);
++#endif
++  printf("\n");
++  printf("  http_guard: %s",
++#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
++  printf(" (%u ms)", (unsigned int)CONFIG_FRUITCLAW_HTTP_GUARD_TIMEOUT_MS);
++#endif
++  printf("\n");
++  printf("  cli_guard: %s",
++#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
++         "enabled"
++#else
++         "disabled"
++#endif
++         );
++#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
++  printf(" (%u ms)", (unsigned int)CONFIG_FRUITCLAW_CLI_GUARD_TIMEOUT_MS);
++#endif
++  printf("\n");
 +  printf("  max_uptime_guard: %s",
 +#ifdef CONFIG_FRUITCLAW_ENABLE_EXEC_GUARD
 +         CONFIG_FRUITCLAW_MAX_UPTIME_GUARD_MS > 0 ? "enabled" : "disabled"
@@ -23762,11 +23758,31 @@ index 000000000..119e171f1
 +         (unsigned int)CONFIG_FRUITCLAW_MAX_UPTIME_GUARD_MS);
 +#endif
 +  printf("\n");
-+  printf("  detail_commands: config, tools, schedule list, mcp status, "
-+         "status-net\n");
-+  fflush(stdout);
++    {
++      char status_guard[768];
 +
-+  return 0;
++      if (fc_guard_status(status_guard, sizeof(status_guard)) == 0)
++        {
++          print_guard_status(status_guard);
++        }
++    }
++#ifdef CONFIG_FRUITCLAW_MCP_SERVER
++    {
++      char mcp_status[512];
++
++      printf("  mcp: enabled\n");
++      if (fc_mcp_status_format(mcp_status, sizeof(mcp_status)) == 0)
++        {
++          printf("  %s\n", mcp_status);
++        }
++    }
++#else
++  printf("  mcp: disabled\n");
++#endif
++  fc_cap_status(stdout);
++  printf("  detail_commands: tools, schedule list, mcp status\n");
++
++  return fc_cli_guard_end(&guard, 0);
 +}
 +
 +static int cmd_telegram_test(void)
@@ -24465,23 +24481,7 @@ index 000000000..119e171f1
 +    }
 +  else if (strcmp(argv[1], "wifi-up") == 0)
 +    {
-+      bool force = false;
-+      int i;
-+
-+      for (i = 2; i < argc; i++)
-+        {
-+          if (strcmp(argv[i], "--force") == 0)
-+            {
-+              force = true;
-+            }
-+          else
-+            {
-+              usage();
-+              return 1;
-+            }
-+        }
-+
-+      return cmd_wifi_up(force);
++      return cmd_wifi_up();
 +    }
 +  else if (strcmp(argv[1], "service") == 0)
 +    {
@@ -38474,6 +38474,196 @@ index 000000000..633004c9f
 +  return 1;
 +#endif
 +}
+diff --git a/system/telnetd/Kconfig b/system/telnetd/Kconfig
+index f3ad64de4..16bb3e81e 100644
+--- a/system/telnetd/Kconfig
++++ b/system/telnetd/Kconfig
+@@ -34,6 +34,14 @@ config SYSTEM_TELNETD_PORT
+ 		The telnet daemon will listen on this TCP port number for connections.
+ 		Default: 23
+ 
++config SYSTEM_TELNETD_PID_PATH
++	string "Telnetd daemon PID file"
++	default "/tmp/telnetd.pid"
++	---help---
++		Path where the telnetd application records the daemon PID when it is
++		started in daemon mode. The same application can later be called with
++		-k to stop that daemon.
++
+ config SYSTEM_TELNETD_SESSION_PRIORITY
+ 	int "Telnetd session task priority"
+ 	default 100
+diff --git a/system/telnetd/telnetd.c b/system/telnetd/telnetd.c
+index 5d861b1b1..934f1300a 100644
+--- a/system/telnetd/telnetd.c
++++ b/system/telnetd/telnetd.c
+@@ -27,6 +27,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <unistd.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <signal.h>
+ 
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+@@ -34,6 +37,101 @@
+ #include "netutils/telnetd.h"
+ #include "nshlib/nshlib.h"
+ 
++#ifndef CONFIG_SYSTEM_TELNETD_PID_PATH
++#  define CONFIG_SYSTEM_TELNETD_PID_PATH "/tmp/telnetd.pid"
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++static int telnetd_write_pid(void)
++{
++  char buf[24];
++  int fd;
++  int len;
++  ssize_t n;
++
++  fd = open(CONFIG_SYSTEM_TELNETD_PID_PATH, O_WRONLY | O_CREAT | O_TRUNC,
++            0664);
++  if (fd < 0)
++    {
++      return -errno;
++    }
++
++  len = snprintf(buf, sizeof(buf), "%ld\n", (long)getpid());
++  n = write(fd, buf, len);
++  close(fd);
++  return n == len ? 0 : -EIO;
++}
++
++static int telnetd_read_pid(pid_t *pid)
++{
++  char buf[24];
++  char *end;
++  long value;
++  int fd;
++  ssize_t n;
++
++  if (pid == NULL)
++    {
++      return -EINVAL;
++    }
++
++  fd = open(CONFIG_SYSTEM_TELNETD_PID_PATH, O_RDONLY);
++  if (fd < 0)
++    {
++      return -errno;
++    }
++
++  n = read(fd, buf, sizeof(buf) - 1);
++  close(fd);
++  if (n <= 0)
++    {
++      return n < 0 ? -errno : -EINVAL;
++    }
++
++  buf[n] = '\0';
++  value = strtol(buf, &end, 10);
++  if (end == buf || value <= 0)
++    {
++      return -EINVAL;
++    }
++
++  *pid = (pid_t)value;
++  return 0;
++}
++
++static int telnetd_stop(void)
++{
++  pid_t pid;
++  int ret;
++
++  ret = telnetd_read_pid(&pid);
++  if (ret < 0)
++    {
++      fprintf(stderr, "telnetd: no daemon PID at %s: %d\n",
++              CONFIG_SYSTEM_TELNETD_PID_PATH, ret);
++      return EXIT_FAILURE;
++    }
++
++  if (kill(pid, SIGTERM) < 0)
++    {
++      ret = -errno;
++      if (ret == -ESRCH)
++        {
++          unlink(CONFIG_SYSTEM_TELNETD_PID_PATH);
++        }
++
++      fprintf(stderr, "telnetd: kill(%ld) failed: %d\n", (long)pid, ret);
++      return EXIT_FAILURE;
++    }
++
++  unlink(CONFIG_SYSTEM_TELNETD_PID_PATH);
++  printf("telnetd: stopped pid %ld\n", (long)pid);
++  return EXIT_SUCCESS;
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -67,9 +165,10 @@ int main(int argc, FAR char *argv[])
+   };
+ 
+   int daemon = 1;
++  int stop = 0;
+   int opt;
+ 
+-  while ((opt = getopt(argc, argv, "46cp:")) != ERROR)
++  while ((opt = getopt(argc, argv, "46ckp:")) != ERROR)
+     {
+       switch (opt)
+         {
+@@ -87,15 +186,40 @@ int main(int argc, FAR char *argv[])
+             daemon = 0;
+             break;
+ 
++          case 'k':
++            stop = 1;
++            break;
++
+           case 'p':
+             config.d_port = atoi(optarg);
+             break;
+ 
+           default:
+-            fprintf(stderr, "Usage: %s [-4|-6] [-p port]\n", argv[0]);
++            fprintf(stderr, "Usage: %s [-4|-6] [-c|-k] [-p port]\n",
++                    argv[0]);
+             exit(EXIT_FAILURE);
+         }
+     }
+ 
+-  return daemon ? telnetd_daemon(&config) : nsh_telnetmain(1, argv);
++  if (stop)
++    {
++      return telnetd_stop();
++    }
++
++  if (daemon)
++    {
++      int ret = telnetd_write_pid();
++
++      if (ret < 0)
++        {
++          fprintf(stderr, "telnetd: warning: PID file %s failed: %d\n",
++                  CONFIG_SYSTEM_TELNETD_PID_PATH, ret);
++        }
++
++      ret = telnetd_daemon(&config);
++      unlink(CONFIG_SYSTEM_TELNETD_PID_PATH);
++      return ret;
++    }
++
++  return nsh_telnetmain(1, argv);
+ }
 diff --git a/system/userled/CMakeLists.txt b/system/userled/CMakeLists.txt
 new file mode 100644
 index 000000000..11b3b5ebe
