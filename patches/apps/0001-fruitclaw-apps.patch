@@ -38459,10 +38459,10 @@ index 000000000..1f05f432f
 +include $(APPDIR)/Application.mk
 diff --git a/system/sdmount/sdmount_main.c b/system/sdmount/sdmount_main.c
 new file mode 100644
-index 000000000..633004c9f
+index 000000000..72924429c
 --- /dev/null
 +++ b/system/sdmount/sdmount_main.c
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,187 @@
 +/****************************************************************************
 + * apps/system/sdmount/sdmount_main.c
 + *
@@ -38484,6 +38484,14 @@ index 000000000..633004c9f
 +#include <unistd.h>
 +
 +#include <arch/board/rp23xx_spisd.h>
++
++#ifndef CONFIG_SYSTEM_SDMOUNT_DEVPATH
++#  define CONFIG_SYSTEM_SDMOUNT_DEVPATH "/dev/mmcsd0"
++#endif
++
++#ifndef CONFIG_SYSTEM_SDMOUNT_MOUNTPOINT
++#  define CONFIG_SYSTEM_SDMOUNT_MOUNTPOINT "/mnt/sd0"
++#endif
 +
 +#ifndef CONFIG_SYSTEM_SDMOUNT_TIMEOUT_SEC
 +#  define CONFIG_SYSTEM_SDMOUNT_TIMEOUT_SEC 12
