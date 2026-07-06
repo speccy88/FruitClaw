@@ -7,53 +7,59 @@ YOLO MCP, Telegram/DeepSeek agent plumbing, Berry scripting, LVGL/Berry
 bindings, NeoPixels, scheduler tools, Telnet/FTP service control, USB
 keyboard/mouse/Xbox input, and watchdog recovery.
 
-This repository is a wrapper around two source submodules so the NuttX and
-apps histories stay clean and rebuildable:
+This repository is a wrapper around the real Apache upstream repositories plus
+a small FruitClaw patch layer. A clean clone should not need the old personal
+`FruitClaw-nuttx` or `FruitClaw-apps` forks:
 
-- `apps`: `https://github.com/speccy88/FruitClaw-apps.git`
-- `nuttx`: `https://github.com/speccy88/FruitClaw-nuttx.git`
+- `nuttx`: `https://github.com/apache/nuttx.git`
+- `apps`: `https://github.com/apache/nuttx-apps.git`
+- FruitClaw patch set:
+  - `patches/nuttx/0001-fruitclaw-nuttx.patch`
+  - `patches/apps/0001-fruitclaw-apps.patch`
 
 ## Current Production Release
 
 The current FruitClaw operator UF2 is:
 
 ```text
-artifacts/fruitclaw-operator-production-20260703-170751.uf2
+artifacts/fruitclaw-operator-upstream-backup-20260706.uf2
 ```
 
 SHA-256:
 
 ```text
-4c7711a8243c78a7e1d8adabe632f022fb2a4511128f3247f17135c023faa59b
+164adacbd3a29b110d895659805c92750ba1848760e71efcba9b406bd9fb12d7
 ```
 
 It is built from:
 
 ```text
-FruitClaw wrapper: the GitHub release tag records the exact wrapper commit
-apps submodule:    5451a14dbdf403ee158fd0851058b09bd1ff2c84
-nuttx submodule:   6f193626230efe454f43913d7176b698ec38148d
-profile:           adafruit-fruit-jam-rp2350:esp-hosted
+nuttx upstream base: a923e4a714d55a4963c0bd68d90a1bb936d200f8
+apps upstream base:  4c560ef0a202aa00657e67f4572aee0ed071bd0f
+nuttx patch source:  1792728c42e4 FruitClaw fork snapshot plus local hardening
+apps patch source:   28c08cb14a7c FruitClaw fork snapshot plus local hardening
+profile:             adafruit-fruit-jam-rp2350:esp-hosted
 ```
 
 Build size from `arm-none-eabi-size nuttx/nuttx`:
 
 ```text
-text=1196044  data=272  bss=206876  total=1403192 bytes
+text=1199116  data=272  bss=215380  total=1414768 bytes
 ```
 
 Linker memory report:
 
 ```text
-FLASH: 1196316 B / 16 MB  (7.13%)
-RAM:    240940 B / 512 KB (45.96%)
+FLASH: 1199388 B / 16 MB
+RAM:    250980 B / 512 KB
 ```
 
 Validation for this production release:
 
-- Built with `make -C nuttx -j8` after regenerating the embedded uIP webserver
-  filesystem.
-- `nuttx/nuttx.uf2` matches the release asset byte for byte.
+- Built with `PATH=$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH` and
+  `make -C nuttx -j8` after configuring the `esp-hosted` profile.
+- `nuttx/nuttx.uf2` from a clean Apache-plus-patches rebuild matches the
+  release asset byte for byte.
 - The release profile disables the development max-uptime BOOTSEL fuse.
 - Guarded runtime failures use watchdog reset back into NuttX/FruitClaw.
 - `device.read` rejects raw block devices before opening them, so MCP/Telegram
@@ -85,7 +91,7 @@ consumer appliance.
 With the board in BOOTSEL:
 
 ```sh
-picotool load -x artifacts/fruitclaw-operator-production-20260703-170751.uf2
+picotool load -x artifacts/fruitclaw-operator-upstream-backup-20260706.uf2
 ```
 
 Or flash a local build:
@@ -377,32 +383,31 @@ the current `NINA_ADAFRUIT-fruitjam_c6-<version>.bin`.
 
 ## Clone The Source
 
-Use recursive submodules:
+Use recursive submodules, then apply the FruitClaw patch layer:
 
 ```sh
 git clone --recurse-submodules https://github.com/speccy88/FruitClaw.git
 cd FruitClaw
+scripts/apply-fruitclaw-patches.sh
 ```
 
 If the checkout already exists:
 
 ```sh
 git submodule update --init --recursive
-git -C apps checkout master
-git -C nuttx checkout master
-git -C apps pull --ff-only fruitclaw master
-git -C nuttx pull --ff-only fruitclaw master
+scripts/apply-fruitclaw-patches.sh
 ```
+
+The submodules are pinned to Apache upstream commits. Do not pull the old fork
+remotes when trying to reproduce this release; the custom FruitClaw changes are
+tracked in `patches/`.
 
 ## Build The Production UF2
 
 Native macOS/Linux build:
 
 ```sh
-export PATH="$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH"
-cd nuttx
-./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:esp-hosted
-make -j8
+scripts/build-fruitclaw.sh
 ```
 
 The generated UF2 is:
@@ -420,12 +425,23 @@ make olddefconfig
 make -j8
 ```
 
+Manual equivalent:
+
+```sh
+scripts/apply-fruitclaw-patches.sh
+export PATH="$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH"
+cd nuttx
+./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:esp-hosted
+make -j8
+```
+
 ## Docker Incremental Builds
 
 The helper below is for a warm Docker build tree. It avoids rebuilding the
 whole world when only FruitClaw-relevant paths changed:
 
 ```sh
+scripts/apply-fruitclaw-patches.sh
 scripts/fruitclaw_docker_incremental.sh --configure
 scripts/fruitclaw_docker_incremental.sh
 ```
@@ -458,6 +474,25 @@ More detail lives in the source tree and on the board:
   `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/TRMNL_DVI_TIMING.md`
 - ESP-Hosted board notes:
   `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/ESP_HOSTED.md`
+
+## Patch Maintenance
+
+The wrapper repo intentionally stores only:
+
+- Apache upstream submodule pins.
+- FruitClaw patch files under `patches/`.
+- Build/flash helper scripts.
+- Release artifacts and checksums.
+
+The patch files were exported from the local FruitClaw bring-up trees, but they
+exclude generated build products, Finder duplicate files, the old NXDoom import,
+and the separate TRMNL app. Keep real Wi-Fi, Telegram, DeepSeek, TRMNL, or other
+tokens out of patches, docs, defconfigs, release notes, and artifacts.
+
+When refreshing the patch layer, start from the current working FruitClaw trees,
+export against the Apache base commits listed near the top of this README, and
+rerun `scripts/apply-fruitclaw-patches.sh` in a fresh clone before trusting the
+backup.
 
 ## Known Release Boundaries
 
