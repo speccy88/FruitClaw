@@ -1858,10 +1858,10 @@ index 000000000..d17c8c23d
 +`nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/SDIO.md`.
 diff --git a/examples/webserver/httpd-fs/docs/pages/examples.md b/examples/webserver/httpd-fs/docs/pages/examples.md
 new file mode 100644
-index 000000000..4e4b9214c
+index 000000000..4f34340af
 --- /dev/null
 +++ b/examples/webserver/httpd-fs/docs/pages/examples.md
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,176 @@
 +# Examples
 +
 +These examples are copy-paste starting points. Replace `DEVICE_IP` with the
@@ -2005,11 +2005,14 @@ index 000000000..4e4b9214c
 +fruitclaw schedule add-after reminder 60 "Send a reminder"
 +fruitclaw schedule add-interval heartbeat 3600 "Run heartbeat"
 +fruitclaw schedule add-cron morning "0 8 * * *" "Run morning workflow"
++fruitclaw schedule add-boot ui "tool:script.run {\"path\":\"generated/ui.be\",\"kind\":\"berry\"}"
 +fruitclaw schedule remove reminder
 +```
 +
-+Plain schedule prompts are delivered directly at fire time. Prefix the prompt
-+with `agent:` only when the scheduled job should wake DeepSeek and use tools.
++Plain schedule prompts are delivered directly at fire time. Boot schedules run
++once each time FruitClaw starts, which is the intended path for generated LVGL
++UIs and maintenance scripts. Prefix the prompt with `agent:` only when the
++scheduled job should wake DeepSeek and use tools.
 +
 +## Berry
 +
@@ -2895,10 +2898,10 @@ index 000000000..4209149e4
 +`nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig`.
 diff --git a/examples/webserver/httpd-fs/docs/pages/tools.md b/examples/webserver/httpd-fs/docs/pages/tools.md
 new file mode 100644
-index 000000000..450c9589c
+index 000000000..954027d18
 --- /dev/null
 +++ b/examples/webserver/httpd-fs/docs/pages/tools.md
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,196 @@
 +# Tools
 +
 +FruitClaw tools are the actions the board can perform. There are two ways to
@@ -2943,6 +2946,7 @@ index 000000000..450c9589c
 +fruitclaw schedule add-once <id> <epoch-seconds> <prompt>
 +fruitclaw schedule add-after <id> <seconds> <prompt>
 +fruitclaw schedule add-cron <id> <expr> <prompt>
++fruitclaw schedule add-boot <id> <prompt>
 +fruitclaw schedule remove <id>
 +fruitclaw berry-run <path> [json-args]
 +fruitclaw berry-smoke
@@ -3037,9 +3041,9 @@ index 000000000..450c9589c
 +| `script.write` | Create or replace a generated Berry or NSH script, with optional validation. |
 +| `script.validate` | Run a generated Berry or NSH script through the guarded runner. |
 +| `script.run` | Run a generated Berry or NSH script directly. |
-+| `script.schedule` | Schedule a generated script once, on an interval, or by cron. |
++| `script.schedule` | Schedule a generated script at boot, once, on an interval, or by cron. |
 +| `telegram.send_message` | Send plain text to an allowed Telegram chat. |
-+| `scheduler.add` | Add interval, once, after, or cron schedules. |
++| `scheduler.add` | Add boot, interval, once, after, or cron schedules. |
 +| `scheduler.list` | List configured schedules. |
 +| `scheduler.remove` | Remove a schedule by ID. |
 +| `berry.run_script` | Run a Berry script under the data-root `scripts/` directory. |
@@ -3382,7 +3386,7 @@ index 000000000..514ca3a4f
 +`nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/ESP_HOSTED.md`.
 diff --git a/examples/webserver/httpd-fs/docs/pages/utilities.md b/examples/webserver/httpd-fs/docs/pages/utilities.md
 new file mode 100644
-index 000000000..12811057c
+index 000000000..c2a2686a7
 --- /dev/null
 +++ b/examples/webserver/httpd-fs/docs/pages/utilities.md
 @@ -0,0 +1,92 @@
@@ -3411,7 +3415,7 @@ index 000000000..12811057c
 +| `fruitclaw config set-secret telegram` | Store the Telegram bot token without printing it. |
 +| `fruitclaw config set-secret deepseek` | Store the DeepSeek API key without printing it. |
 +| `fruitclaw tools` | List registered capability tools. |
-+| `fruitclaw selftest` | Run offline sanity tests for JSON, tools, queues, cron, memory, paths, scheduled direct tools, and mapping logic. |
++| `fruitclaw selftest` | Run offline sanity tests for JSON, tools, queues, cron, memory, paths, scheduled direct tools, boot schedules, and mapping logic. |
 +| `fruitclaw telegram-test` | Send a test Telegram message to the allowed chat. |
 +| `fruitclaw deepseek-test` | Test outbound DeepSeek chat/completions. |
 +| `fruitclaw terminal-run <cmd...>` | Run a bounded NSH command and capture output. |
@@ -3419,7 +3423,7 @@ index 000000000..12811057c
 +| `fruitclaw service <start|stop|restart|enable|disable> <service>` | Manage Telnet/FTP where the underlying daemon supports the action. |
 +| `fruitclaw berry-run <path> [json-args]` | Run a Berry script below `scripts/`. |
 +| `fruitclaw berry-smoke` | Verify the real Berry runner and `claw` binding. |
-+| `fruitclaw schedule ...` | Add/list/remove interval, once, after, and cron schedules. |
++| `fruitclaw schedule ...` | Add/list/remove boot, interval, once, after, and cron schedules. |
 +| `fruitclaw neopixels ...` | Drive `/dev/leds0`. |
 +| `fruitclaw device ...` | List/read/write bounded `/dev` paths. |
 +| `fruitclaw mcp status` | Show MCP endpoint counters. |
@@ -10933,10 +10937,10 @@ index 000000000..f96ede00c
 +include $(APPDIR)/Application.mk
 diff --git a/system/fruitclaw/README.md b/system/fruitclaw/README.md
 new file mode 100644
-index 000000000..452af7867
+index 000000000..e52916620
 --- /dev/null
 +++ b/system/fruitclaw/README.md
-@@ -0,0 +1,685 @@
+@@ -0,0 +1,690 @@
 +# FruitClaw
 +
 +FruitClaw is a small NuttX-native embedded agent app for the Adafruit Fruit Jam
@@ -11205,11 +11209,13 @@ index 000000000..452af7867
 +fruitclaw schedule add-after reminder 60 "Send a reminder"
 +fruitclaw schedule add-once exact 4102444800 "Run at epoch time"
 +fruitclaw schedule add-cron morning "0 8 * * *" "Run morning workflow"
++fruitclaw schedule add-boot ui "tool:script.run {\"path\":\"generated/ui.be\",\"kind\":\"berry\"}"
 +fruitclaw schedule remove heartbeat
 +```
 +
-+The `scheduler.add` tool accepts the same schedule types.  For natural
-+Telegram requests such as "remind me in 60 seconds", use
++The `scheduler.add` tool accepts the same schedule types, including `boot` for
++runtime autostart jobs. For natural Telegram requests such as "remind me in 60
++seconds", use
 +`{"type":"once","after_sec":60,"prompt":"..."}`; for exact one-shot times, use
 +`at_epoch`.  Plain schedule prompts are delivered directly at fire time so
 +simple reminders cannot wedge the LLM path.  Prefix the prompt with `agent:`
@@ -11250,15 +11256,18 @@ index 000000000..452af7867
 +`script.write`, `script.read`, `script.validate`, `script.run`, and
 +`script.schedule` support Berry `.be` scripts and NSH `.nsh` scripts.  A
 +scheduled generated script fires `script.run` directly, so the scheduler does
-+not need another LLM turn to run the script.
++not need another LLM turn to run the script. Use `script.schedule` with
++`{"type":"boot"}` to autostart a generated maintenance script or LVGL UI every
++time FruitClaw starts.
 +
 +As of the current hardware slice, `fruitclaw berry-smoke`,
 +`fruitclaw selftest`, MCP `berry.run_script`, `import claw`, and a Berry script
 +calling back into `terminal.run` have been verified on the Fruit Jam RP2350.
 +The offline selftest now also proves that a scheduled `tool:...` event runs
-+directly with the creator's owner chat/session context. The generated
-+`script.run` hardware path still needs the same board smoke test. More complex
-+Berry/LVGL integration is still bring-up work.
++directly with the creator's owner chat/session context, and that both
++`scheduler.add` and `script.schedule` can persist boot/autostart jobs. The
++generated `script.run` hardware path still needs the same board smoke test.
++More complex Berry/LVGL integration is still bring-up work.
 +
 +## Recovery Model
 +
@@ -11624,10 +11633,10 @@ index 000000000..452af7867
 +  production profile so it does not interrupt healthy MCP/Telegram sessions.
 diff --git a/system/fruitclaw/caps/fc_caps_builtin.c b/system/fruitclaw/caps/fc_caps_builtin.c
 new file mode 100644
-index 000000000..fd7b2bd4b
+index 000000000..6213bb403
 --- /dev/null
 +++ b/system/fruitclaw/caps/fc_caps_builtin.c
-@@ -0,0 +1,3969 @@
+@@ -0,0 +1,3989 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -13698,6 +13707,10 @@ index 000000000..fd7b2bd4b
 +      ret = epoch > 0 ? fc_scheduler_add_once_ctx(id, epoch, prompt, ctx) :
 +                        -EINVAL;
 +    }
++  else if (strcmp(type, "boot") == 0)
++    {
++      ret = fc_scheduler_add_boot_ctx(id, prompt, ctx);
++    }
 +  else
 +    {
 +      ret = -EINVAL;
@@ -13947,6 +13960,20 @@ index 000000000..fd7b2bd4b
 +
 +          ret = fc_scheduler_add_once_ctx(id, epoch, prompt, ctx);
 +        }
++    }
++  else if (strcmp(type, "boot") == 0)
++    {
++      ret = fc_tool_guard_arm(ctx, FC_GUARD_STAGE_SCHED, &guard_fd);
++      if (ret < 0)
++        {
++          cJSON_Delete(root);
++          snprintf(out, out_len,
++                   "{\"ok\":false,\"error\":\"scheduler guard "
++                   "unavailable\",\"code\":%d}", ret);
++          return ret;
++        }
++
++      ret = fc_scheduler_add_boot_ctx(id, prompt, ctx);
 +    }
 +
 +  cJSON_Delete(root);
@@ -15421,14 +15448,15 @@ index 000000000..fd7b2bd4b
 +  },
 +  {
 +    "script.schedule", "Schedule generated script",
-+    "Schedule a generated Berry or NSH script to run once, on an interval, "
-+    "or from a 5-field cron expression. The scheduler fires script.run "
-+    "directly without needing the LLM.",
++    "Schedule a generated Berry or NSH script to run at boot, once, on an "
++    "interval, or from a 5-field cron expression. The scheduler fires "
++    "script.run directly without needing the LLM.",
 +    "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},"
 +    "\"name\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},"
 +    "\"kind\":{\"type\":\"string\",\"enum\":[\"auto\",\"berry\",\"be\","
 +    "\"shell\",\"nsh\",\"sh\"]},"
-+    "\"type\":{\"type\":\"string\",\"enum\":[\"interval\",\"once\",\"cron\"]},"
++    "\"type\":{\"type\":\"string\",\"enum\":[\"interval\",\"once\",\"cron\","
++    "\"boot\"]},"
 +    "\"every_sec\":{\"type\":\"integer\"},\"at_epoch\":{\"type\":\"integer\"},"
 +    "\"after_sec\":{\"type\":\"integer\"},\"expr\":{\"type\":\"string\"},"
 +    "\"args_json\":{\"type\":\"string\"}},"
@@ -15446,11 +15474,12 @@ index 000000000..fd7b2bd4b
 +  },
 +  {
 +    "scheduler.add", "Add schedule",
-+    "Add an interval, once, or cron schedule. Schedules inherit the current "
-+    "owner chat and session. Plain prompts are delivered directly at fire "
-+    "time; prefix prompt with agent: to run the full LLM/tool loop.",
++    "Add a boot, interval, once, or cron schedule. Schedules inherit the "
++    "current owner chat and session. Plain prompts are delivered directly at "
++    "fire time; prefix prompt with agent: to run the full LLM/tool loop.",
 +    "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},"
-+    "\"type\":{\"type\":\"string\",\"enum\":[\"interval\",\"once\",\"cron\"]},"
++    "\"type\":{\"type\":\"string\",\"enum\":[\"interval\",\"once\",\"cron\","
++    "\"boot\"]},"
 +    "\"every_sec\":{\"type\":\"integer\"},\"at_epoch\":{\"type\":\"integer\"},"
 +    "\"after_sec\":{\"type\":\"integer\"},"
 +    "\"expr\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"}},"
@@ -19232,10 +19261,10 @@ index 000000000..24bffa958
 +}
 diff --git a/system/fruitclaw/core/fc_selftest.c b/system/fruitclaw/core/fc_selftest.c
 new file mode 100644
-index 000000000..f138c70bd
+index 000000000..528b3b4c1
 --- /dev/null
 +++ b/system/fruitclaw/core/fc_selftest.c
-@@ -0,0 +1,767 @@
+@@ -0,0 +1,798 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -19706,6 +19735,7 @@ index 000000000..f138c70bd
 +  fc_scheduler_remove("selftest-job");
 +  fc_scheduler_remove("selftest-once");
 +  fc_scheduler_remove("selftest-after");
++  fc_scheduler_remove("selftest-boot");
 +  buf[0] = '\0';
 +  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.add",
 +               "{\"id\":\"selftest-job\",\"type\":\"interval\","
@@ -19751,6 +19781,23 @@ index 000000000..f138c70bd
 +  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.remove",
 +               "{\"id\":\"selftest-after\"}", buf, sizeof(buf)) == 0,
 +               "scheduler remove after");
++  buf[0] = '\0';
++  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.add",
++               "{\"id\":\"selftest-boot\",\"type\":\"boot\","
++               "\"prompt\":\"selftest boot\"}",
++               buf, sizeof(buf)) == 0 &&
++               strstr(buf, "\"id\":\"selftest-boot\"") != NULL,
++               "scheduler add boot");
++  buf[0] = '\0';
++  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.list", "{}",
++                                  buf, sizeof(buf)) == 0 &&
++               strstr(buf, "selftest-boot") != NULL &&
++               strstr(buf, "boot") != NULL,
++               "scheduler list boot");
++  buf[0] = '\0';
++  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.remove",
++               "{\"id\":\"selftest-boot\"}", buf, sizeof(buf)) == 0,
++               "scheduler remove boot");
 +  status[0] = '\0';
 +  ret |= check(fc_scheduler_status_format(status, sizeof(status)) == 0 &&
 +               strstr(status, "scheduler_status:") != NULL &&
@@ -19830,6 +19877,7 @@ index 000000000..f138c70bd
 +  {
 +    char script_path[FC_PATH_LEN] = "";
 +
++    fc_scheduler_remove("selftest-script-boot");
 +    if (fc_data_path("scripts/generated/selftest_shell.nsh",
 +                     script_path, sizeof(script_path)) == 0)
 +      {
@@ -19857,6 +19905,18 @@ index 000000000..f138c70bd
 +                 buf, sizeof(buf)) == 0 &&
 +                 strstr(buf, "selftest_shell.nsh") != NULL,
 +                 "script list shell");
++    buf[0] = '\0';
++    ret |= check(fc_cap_execute_ctx(&tool_ctx, "script.schedule",
++                 "{\"name\":\"selftest_shell\",\"kind\":\"shell\","
++                 "\"type\":\"boot\",\"id\":\"selftest-script-boot\"}",
++                 buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"id\":\"selftest-script-boot\"") != NULL &&
++                 strstr(buf, "\"type\":\"boot\"") != NULL,
++                 "script schedule boot");
++    buf[0] = '\0';
++    ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.remove",
++                 "{\"id\":\"selftest-script-boot\"}", buf, sizeof(buf)) == 0,
++                 "script schedule boot remove");
 +
 +    if (script_path[0] != '\0')
 +      {
@@ -20005,10 +20065,10 @@ index 000000000..f138c70bd
 +}
 diff --git a/system/fruitclaw/fruitclaw_main.c b/system/fruitclaw/fruitclaw_main.c
 new file mode 100644
-index 000000000..e3d72f721
+index 000000000..e8c3d3b31
 --- /dev/null
 +++ b/system/fruitclaw/fruitclaw_main.c
-@@ -0,0 +1,4553 @@
+@@ -0,0 +1,4562 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -20180,6 +20240,7 @@ index 000000000..e3d72f721
 +  printf("  fruitclaw schedule add-once <id> <epoch-seconds> <prompt>\n");
 +  printf("  fruitclaw schedule add-after <id> <seconds> <prompt>\n");
 +  printf("  fruitclaw schedule add-cron <id> <expr> <prompt>\n");
++  printf("  fruitclaw schedule add-boot <id> <prompt>\n");
 +  printf("  fruitclaw schedule remove <id>\n");
 +  printf("  fruitclaw berry-run <path> [json-args]\n");
 +  printf("  fruitclaw berry-smoke\n");
@@ -23972,6 +24033,14 @@ index 000000000..e3d72f721
 +      return fc_cli_guard_end(&guard, ret < 0 ? 1 : 0);
 +    }
 +
++  if (strcmp(argv[2], "add-boot") == 0 && argc >= 5)
++    {
++      join_args(argc, argv, 4, prompt, sizeof(prompt));
++      ret = fc_scheduler_add_boot(argv[3], prompt);
++      printf("%s\n", ret == 0 ? "schedule added" : "schedule add failed");
++      return fc_cli_guard_end(&guard, ret < 0 ? 1 : 0);
++    }
++
 +  if (strcmp(argv[2], "remove") == 0 && argc >= 4)
 +    {
 +      ret = fc_scheduler_remove(argv[3]);
@@ -24564,10 +24633,10 @@ index 000000000..e3d72f721
 +}
 diff --git a/system/fruitclaw/include/fruitclaw.h b/system/fruitclaw/include/fruitclaw.h
 new file mode 100644
-index 000000000..844213085
+index 000000000..c295748b1
 --- /dev/null
 +++ b/system/fruitclaw/include/fruitclaw.h
-@@ -0,0 +1,608 @@
+@@ -0,0 +1,612 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#ifndef __APPS_SYSTEM_FRUITCLAW_INCLUDE_FRUITCLAW_H
@@ -24942,7 +25011,8 @@ index 000000000..844213085
 +{
 +  FC_SCHED_INTERVAL = 0,
 +  FC_SCHED_ONCE,
-+  FC_SCHED_CRON
++  FC_SCHED_CRON,
++  FC_SCHED_BOOT
 +} fc_schedule_type_t;
 +
 +typedef struct fc_schedule_s
@@ -25131,6 +25201,9 @@ index 000000000..844213085
 +                          const char *prompt);
 +int fc_scheduler_add_once_ctx(const char *id, int64_t epoch,
 +                              const char *prompt,
++                              const fc_tool_context_t *ctx);
++int fc_scheduler_add_boot(const char *id, const char *prompt);
++int fc_scheduler_add_boot_ctx(const char *id, const char *prompt,
 +                              const fc_tool_context_t *ctx);
 +int fc_scheduler_remove(const char *id);
 +int fc_scheduler_list(char *out, size_t out_len);
@@ -28929,10 +29002,10 @@ index 000000000..0c70971f3
 +}
 diff --git a/system/fruitclaw/sched/fc_scheduler.c b/system/fruitclaw/sched/fc_scheduler.c
 new file mode 100644
-index 000000000..a2a825d8e
+index 000000000..a11726443
 --- /dev/null
 +++ b/system/fruitclaw/sched/fc_scheduler.c
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,1054 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -29323,6 +29396,14 @@ index 000000000..a2a825d8e
 +                     sizeof(job->expr));
 +          job->last_minute_key = -1;
 +        }
++      else if (strcmp(type, "boot") == 0)
++        {
++          job->type = FC_SCHED_BOOT;
++        }
++      else
++        {
++          memset(job, 0, sizeof(*job));
++        }
 +    }
 +
 +  pthread_mutex_unlock(&g_sched_lock);
@@ -29391,10 +29472,14 @@ index 000000000..a2a825d8e
 +          cJSON_AddNumberToObject(obj, "at_epoch",
 +                                  (double)g_jobs[i].at_epoch);
 +        }
-+      else
++      else if (g_jobs[i].type == FC_SCHED_CRON)
 +        {
 +          cJSON_AddStringToObject(obj, "type", "cron");
 +          cJSON_AddStringToObject(obj, "expr", g_jobs[i].expr);
++        }
++      else
++        {
++          cJSON_AddStringToObject(obj, "type", "boot");
 +        }
 +
 +      cJSON_AddItemToArray(arr, obj);
@@ -29573,6 +29658,46 @@ index 000000000..a2a825d8e
 +  return fc_scheduler_add_once_ctx(id, epoch, prompt, NULL);
 +}
 +
++int fc_scheduler_add_boot_ctx(const char *id, const char *prompt,
++                              const fc_tool_context_t *ctx)
++{
++  fc_schedule_t *job;
++  int ret;
++
++  if (id == NULL || prompt == NULL)
++    {
++      return -EINVAL;
++    }
++
++  ret = fc_scheduler_lock_timed();
++  if (ret < 0)
++    {
++      return ret;
++    }
++
++  job = fc_alloc_job(id);
++  if (job == NULL)
++    {
++      pthread_mutex_unlock(&g_sched_lock);
++      return -ENOSPC;
++    }
++
++  fc_strlcpy(job->id, id, sizeof(job->id));
++  fc_strlcpy(job->prompt, prompt, sizeof(job->prompt));
++  job->type = FC_SCHED_BOOT;
++  job->enabled = true;
++  job->last_minute_key = -1;
++  fc_schedule_set_context(job, ctx);
++  pthread_mutex_unlock(&g_sched_lock);
++
++  return fc_scheduler_save();
++}
++
++int fc_scheduler_add_boot(const char *id, const char *prompt)
++{
++  return fc_scheduler_add_boot_ctx(id, prompt, NULL);
++}
++
 +int fc_scheduler_remove(const char *id)
 +{
 +  fc_schedule_t *job;
@@ -29646,13 +29771,23 @@ index 000000000..a2a825d8e
 +                       g_jobs[i].chat_id[0] ? g_jobs[i].chat_id : "-",
 +                       g_jobs[i].owner_mode ? "yes" : "no");
 +        }
-+      else
++      else if (g_jobs[i].type == FC_SCHED_CRON)
 +        {
 +          n = snprintf(out + off, out_len - off,
 +                       "%s %s cron expr=\"%s\" ch=%s chat=%s owner=%s\n",
 +                       g_jobs[i].enabled ? "on" : "off",
 +                       g_jobs[i].id,
 +                       g_jobs[i].expr,
++                       g_jobs[i].channel,
++                       g_jobs[i].chat_id[0] ? g_jobs[i].chat_id : "-",
++                       g_jobs[i].owner_mode ? "yes" : "no");
++        }
++      else
++        {
++          n = snprintf(out + off, out_len - off,
++                       "%s %s boot ch=%s chat=%s owner=%s\n",
++                       g_jobs[i].enabled ? "on" : "off",
++                       g_jobs[i].id,
 +                       g_jobs[i].channel,
 +                       g_jobs[i].chat_id[0] ? g_jobs[i].chat_id : "-",
 +                       g_jobs[i].owner_mode ? "yes" : "no");
@@ -29707,9 +29842,42 @@ index 000000000..a2a825d8e
 +  return ret;
 +}
 +
++static void fc_scheduler_emit_boot_jobs(void)
++{
++  unsigned int i;
++  int ret;
++
++  ret = fc_scheduler_lock_timed();
++  if (ret < 0)
++    {
++      fc_scheduler_record_emit("boot-scan", ret);
++      return;
++    }
++
++  for (i = 0; i < FC_MAX_SCHEDULES; i++)
++    {
++      fc_schedule_t snapshot;
++
++      if (!g_jobs[i].used || !g_jobs[i].enabled ||
++          g_jobs[i].type != FC_SCHED_BOOT)
++        {
++          continue;
++        }
++
++      snapshot = g_jobs[i];
++      pthread_mutex_unlock(&g_sched_lock);
++      fc_emit_schedule(&snapshot);
++      pthread_mutex_lock(&g_sched_lock);
++    }
++
++  pthread_mutex_unlock(&g_sched_lock);
++}
++
 +static void *fc_scheduler_thread_main(void *arg)
 +{
 +  (void)arg;
++
++  fc_scheduler_emit_boot_jobs();
 +
 +  for (; ; )
 +    {
@@ -29758,7 +29926,7 @@ index 000000000..a2a825d8e
 +                  pthread_mutex_lock(&g_sched_lock);
 +                }
 +            }
-+          else
++          else if (g_jobs[i].type == FC_SCHED_CRON)
 +            {
 +              minute_key = tmv.tm_yday * 24 * 60 + tmv.tm_hour * 60 +
 +                           tmv.tm_min;
@@ -38494,7 +38662,7 @@ index f3ad64de4..16bb3e81e 100644
  	int "Telnetd session task priority"
  	default 100
 diff --git a/system/telnetd/telnetd.c b/system/telnetd/telnetd.c
-index 5d861b1b1..934f1300a 100644
+index 5d861b1b1..c7487a5e6 100644
 --- a/system/telnetd/telnetd.c
 +++ b/system/telnetd/telnetd.c
 @@ -27,6 +27,9 @@
@@ -38578,7 +38746,7 @@ index 5d861b1b1..934f1300a 100644
 +
 +static int telnetd_stop(void)
 +{
-+  pid_t pid;
++  pid_t pid = 0;
 +  int ret;
 +
 +  ret = telnetd_read_pid(&pid);
