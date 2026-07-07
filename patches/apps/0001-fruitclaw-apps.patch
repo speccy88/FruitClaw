@@ -74985,10 +74985,10 @@ index 000000000..21058a34b
 +  production profile so it does not interrupt healthy MCP/Telegram sessions.
 diff --git a/system/fruitclaw/caps/fc_caps_builtin.c b/system/fruitclaw/caps/fc_caps_builtin.c
 new file mode 100644
-index 000000000..5e6bad7bc
+index 000000000..345e70298
 --- /dev/null
 +++ b/system/fruitclaw/caps/fc_caps_builtin.c
-@@ -0,0 +1,4198 @@
+@@ -0,0 +1,4235 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -75835,7 +75835,7 @@ index 000000000..5e6bad7bc
 +  cJSON_Delete(root);
 +  snprintf(out, out_len, ret == 0 ?
 +           "{\"ok\":true}" :
-+           "{\"ok\":false,\"error\":\"write failed\"}");
++           "{\"ok\":false,\"error\":\"write failed\",\"code\":%d}", ret);
 +  return ret;
 +}
 +
@@ -76279,6 +76279,35 @@ index 000000000..5e6bad7bc
 +    }
 +}
 +
++static int fc_script_validate_args_json(const char *args_json,
++                                        char *out, size_t out_len)
++{
++  cJSON *parsed;
++
++  if (args_json == NULL || args_json[0] == '\0')
++    {
++      return 0;
++    }
++
++  if (strlen(args_json) > 512)
++    {
++      snprintf(out, out_len,
++               "{\"ok\":false,\"error\":\"script args too large\"}");
++      return -ENOSPC;
++    }
++
++  parsed = cJSON_Parse(args_json);
++  if (parsed == NULL)
++    {
++      snprintf(out, out_len,
++               "{\"ok\":false,\"error\":\"script args invalid JSON\"}");
++      return -EINVAL;
++    }
++
++  cJSON_Delete(parsed);
++  return 0;
++}
++
 +static int fc_script_run_generated(const fc_tool_context_t *ctx,
 +                                   fc_script_kind_t kind,
 +                                   const char *rel, const char *full,
@@ -76706,7 +76735,9 @@ index 000000000..5e6bad7bc
 +  cJSON_Delete(root);
 +  if (ret < 0)
 +    {
-+      snprintf(out, out_len, "{\"ok\":false,\"error\":\"script write failed\"}");
++      snprintf(out, out_len,
++               "{\"ok\":false,\"error\":\"script write failed\","
++               "\"code\":%d}", ret);
 +      return ret;
 +    }
 +
@@ -77005,12 +77036,11 @@ index 000000000..5e6bad7bc
 +      script_args = "{}";
 +    }
 +
-+  if (strlen(script_args) > 512)
++  ret = fc_script_validate_args_json(script_args, out, out_len);
++  if (ret < 0)
 +    {
 +      cJSON_Delete(root);
-+      snprintf(out, out_len,
-+               "{\"ok\":false,\"error\":\"script args too large\"}");
-+      return -ENOSPC;
++      return ret;
 +    }
 +
 +  ret = fc_script_kind_from_arg(kind_arg, &requested_kind);
@@ -77144,12 +77174,11 @@ index 000000000..5e6bad7bc
 +      return -EINVAL;
 +    }
 +
-+  if (strlen(script_args) > 512)
++  ret = fc_script_validate_args_json(script_args, out, out_len);
++  if (ret < 0)
 +    {
 +      cJSON_Delete(root);
-+      snprintf(out, out_len,
-+               "{\"ok\":false,\"error\":\"script args too large\"}");
-+      return -ENOSPC;
++      return ret;
 +    }
 +
 +  ret = fc_script_kind_from_arg(kind_arg, &requested_kind);
@@ -77524,9 +77553,17 @@ index 000000000..5e6bad7bc
 +
 +  cJSON_Delete(root);
 +  fc_guard_disarm(guard_fd);
-+  snprintf(out, out_len, ret == 0 ?
-+           "{\"ok\":true,\"id\":\"%s\"}" :
-+           "{\"ok\":false,\"error\":\"schedule add failed\"}", saved_id);
++  if (ret == 0)
++    {
++      snprintf(out, out_len, "{\"ok\":true,\"id\":\"%s\"}", saved_id);
++    }
++  else
++    {
++      snprintf(out, out_len,
++               "{\"ok\":false,\"error\":\"schedule add failed\","
++               "\"code\":%d}", ret);
++    }
++
 +  return ret;
 +}
 +
@@ -79189,10 +79226,10 @@ index 000000000..5e6bad7bc
 +}
 diff --git a/system/fruitclaw/core/fc_agent.c b/system/fruitclaw/core/fc_agent.c
 new file mode 100644
-index 000000000..a7b27b558
+index 000000000..7dd2b1ce4
 --- /dev/null
 +++ b/system/fruitclaw/core/fc_agent.c
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,749 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -79438,6 +79475,7 @@ index 000000000..a7b27b558
 +    }
 +
 +  fc_tool_context_from_event(ev, &ctx);
++  ctx.guarded = true;
 +  ret = fc_cap_execute_ctx(&ctx, tool, args, result, sizeof(result));
 +  fc_agent_record_tool_result(tool, ret);
 +  snprintf(reply, reply_len, "Scheduled tool %s -> %s: %.512s",
@@ -80413,10 +80451,10 @@ index 000000000..45186d49d
 +}
 diff --git a/system/fruitclaw/core/fc_config.c b/system/fruitclaw/core/fc_config.c
 new file mode 100644
-index 000000000..63cfadea1
+index 000000000..57fd6bfad
 --- /dev/null
 +++ b/system/fruitclaw/core/fc_config.c
-@@ -0,0 +1,811 @@
+@@ -0,0 +1,818 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -80971,7 +81009,10 @@ index 000000000..63cfadea1
 +  fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0664);
 +  if (fd < 0)
 +    {
-+      return -errno;
++      int err = -errno;
++      fprintf(stderr, "fruitclaw: atomic write open failed tmp=%s "
++              "path=%s err=%d\n", tmp, path, err);
++      return err;
 +    }
 +
 +  len = strlen(text);
@@ -80981,6 +81022,8 @@ index 000000000..63cfadea1
 +      int err = written < 0 ? -errno : -EIO;
 +      close(fd);
 +      unlink(tmp);
++      fprintf(stderr, "fruitclaw: atomic write failed tmp=%s path=%s "
++              "err=%d\n", tmp, path, err);
 +      return err;
 +    }
 +
@@ -80993,6 +81036,8 @@ index 000000000..63cfadea1
 +    {
 +      int err = -errno;
 +      unlink(tmp);
++      fprintf(stderr, "fruitclaw: atomic write rename failed tmp=%s "
++              "path=%s err=%d\n", tmp, path, err);
 +      return err;
 +    }
 +
@@ -82816,10 +82861,10 @@ index 000000000..24bffa958
 +}
 diff --git a/system/fruitclaw/core/fc_selftest.c b/system/fruitclaw/core/fc_selftest.c
 new file mode 100644
-index 000000000..5d362bee7
+index 000000000..2ce6d19d9
 --- /dev/null
 +++ b/system/fruitclaw/core/fc_selftest.c
-@@ -0,0 +1,961 @@
+@@ -0,0 +1,988 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -82869,6 +82914,17 @@ index 000000000..5d362bee7
 +  printf("PASS: %s\n", name);
 +  fflush(stdout);
 +  return 0;
++}
++
++static int check_detail(bool expr, const char *name, const char *detail)
++{
++  if (!expr && detail != NULL && detail[0] != '\0')
++    {
++      printf("DETAIL: %s: %.512s\n", name, detail);
++      fflush(stdout);
++    }
++
++  return check(expr, name);
 +}
 +
 +static int restore_disabled_marker(const char *path, bool existed)
@@ -83353,11 +83409,12 @@ index 000000000..5d362bee7
 +  fc_init_data_dir();
 +  memset(&tool_ctx, 0, sizeof(tool_ctx));
 +  tool_ctx.owner_mode = true;
++  tool_ctx.guarded = true;
 +  buf[0] = '\0';
-+  ret |= check(fc_cap_execute_ctx(&tool_ctx, "file.write_limited",
-+               "{\"path\":\"scripts/selftest_write.txt\","
-+               "\"text\":\"claw.reply(\\\"selftest\\\")\\n\"}",
-+               buf, sizeof(buf)) == 0, "file write limited");
++  ret |= check_detail(fc_cap_execute_ctx(&tool_ctx, "file.write_limited",
++                      "{\"path\":\"scripts/selftest_write.txt\","
++                      "\"text\":\"claw.reply(\\\"selftest\\\")\\n\"}",
++                      buf, sizeof(buf)) == 0, "file write limited", buf);
 +  buf[0] = '\0';
 +  ret |= check(fc_data_path("scripts/selftest_write.txt", path,
 +                            sizeof(path)) == 0 &&
@@ -83403,12 +83460,12 @@ index 000000000..5d362bee7
 +  fc_scheduler_remove("selftest-after");
 +  fc_scheduler_remove("selftest-boot");
 +  buf[0] = '\0';
-+  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.add",
-+               "{\"id\":\"selftest-job\",\"type\":\"interval\","
-+               "\"every_sec\":60,\"prompt\":\"selftest\"}",
-+               buf, sizeof(buf)) == 0 &&
-+               strstr(buf, "\"id\":\"selftest-job\"") != NULL,
-+               "scheduler add");
++  ret |= check_detail(fc_cap_execute_ctx(&tool_ctx, "scheduler.add",
++                      "{\"id\":\"selftest-job\",\"type\":\"interval\","
++                      "\"every_sec\":60,\"prompt\":\"selftest\"}",
++                      buf, sizeof(buf)) == 0 &&
++                      strstr(buf, "\"id\":\"selftest-job\"") != NULL,
++                      "scheduler add", buf);
 +  buf[0] = '\0';
 +  ret |= check(fc_cap_execute_ctx(&tool_ctx, "scheduler.list", "{}",
 +                                  buf, sizeof(buf)) == 0 &&
@@ -83551,14 +83608,14 @@ index 000000000..5d362bee7
 +      }
 +
 +    buf[0] = '\0';
-+    ret |= check(fc_cap_execute_ctx(&tool_ctx, "script.write",
-+                 "{\"name\":\"selftest_shell\",\"kind\":\"shell\","
-+                 "\"description\":\"selftest generated shell\","
-+                 "\"text\":\"echo selftest-shell\\n\","
-+                 "\"validate\":false}",
-+                 buf, sizeof(buf)) == 0 &&
-+                 strstr(buf, "\"kind\":\"shell\"") != NULL,
-+                 "script write shell");
++    ret |= check_detail(fc_cap_execute_ctx(&tool_ctx, "script.write",
++                        "{\"name\":\"selftest_shell\",\"kind\":\"shell\","
++                        "\"description\":\"selftest generated shell\","
++                        "\"text\":\"echo selftest-shell\\n\","
++                        "\"validate\":false}",
++                        buf, sizeof(buf)) == 0 &&
++                        strstr(buf, "\"kind\":\"shell\"") != NULL,
++                        "script write shell", buf);
 +    buf[0] = '\0';
 +    ret |= check(fc_cap_execute_ctx(&tool_ctx, "script.read",
 +                 "{\"name\":\"selftest_shell\",\"kind\":\"shell\"}",
@@ -83571,6 +83628,21 @@ index 000000000..5d362bee7
 +                 buf, sizeof(buf)) == 0 &&
 +                 strstr(buf, "selftest_shell.nsh") != NULL,
 +                 "script list shell");
++    buf[0] = '\0';
++    ret |= check(fc_cap_execute_ctx(&tool_ctx, "script.run",
++                 "{\"name\":\"selftest_shell\",\"kind\":\"shell\","
++                 "\"args_json\":\"{bad\"}",
++                 buf, sizeof(buf)) < 0 &&
++                 strstr(buf, "script args invalid JSON") != NULL,
++                 "script run bad args rejected");
++    buf[0] = '\0';
++    ret |= check(fc_cap_execute_ctx(&tool_ctx, "script.schedule",
++                 "{\"name\":\"selftest_shell\",\"kind\":\"shell\","
++                 "\"type\":\"boot\",\"id\":\"selftest-script-bad\","
++                 "\"args_json\":\"{bad\"}",
++                 buf, sizeof(buf)) < 0 &&
++                 strstr(buf, "script args invalid JSON") != NULL,
++                 "script schedule bad args rejected");
 +    buf[0] = '\0';
 +    ret |= check(fc_cap_execute_ctx(&tool_ctx, "script.schedule",
 +                 "{\"name\":\"selftest_shell\",\"kind\":\"shell\","
@@ -94220,10 +94292,10 @@ index 000000000..38309177e
 +}
 diff --git a/system/fruitclaw/storage/fc_memory.c b/system/fruitclaw/storage/fc_memory.c
 new file mode 100644
-index 000000000..c7b095203
+index 000000000..cb8d89382
 --- /dev/null
 +++ b/system/fruitclaw/storage/fc_memory.c
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,373 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -94243,6 +94315,7 @@ index 000000000..c7b095203
 +  off_t end;
 +  off_t start;
 +  ssize_t nread;
++  size_t window;
 +  size_t want;
 +
 +  if (path == NULL || out == NULL || out_len == 0)
@@ -94270,40 +94343,68 @@ index 000000000..c7b095203
 +      max_bytes = out_len - 1;
 +    }
 +
-+  start = end > (off_t)max_bytes ? end - (off_t)max_bytes : 0;
-+  if (lseek(fd, start, SEEK_SET) < 0)
++  window = max_bytes;
++  if (window == 0)
 +    {
-+      int err = -errno;
 +      close(fd);
-+      return err;
++      return 0;
 +    }
 +
-+  want = end - start;
-+  nread = read(fd, out, want);
-+  close(fd);
-+
-+  if (nread < 0)
++  for (; ; )
 +    {
-+      return -errno;
-+    }
-+
-+  out[nread] = '\0';
-+  if (start > 0 && nread > 0)
-+    {
-+      char *next_line = strchr(out, '\n');
-+
-+      if (next_line != NULL)
++      start = end > (off_t)window ? end - (off_t)window : 0;
++      if (lseek(fd, start, SEEK_SET) < 0)
 +        {
-+          size_t skip = (size_t)(next_line - out) + 1;
-+
-+          memmove(out, out + skip, (size_t)nread - skip + 1);
++          int err = -errno;
++          close(fd);
++          return err;
 +        }
-+      else
++
++      want = end - start;
++      nread = read(fd, out, want);
++      if (nread < 0)
 +        {
++          int err = -errno;
++          close(fd);
++          return err;
++        }
++
++      out[nread] = '\0';
++      if (start > 0 && nread > 0)
++        {
++          char *next_line = strchr(out, '\n');
++
++          if (next_line != NULL)
++            {
++              size_t skip = (size_t)(next_line - out) + 1;
++
++              if (skip < (size_t)nread)
++                {
++                  memmove(out, out + skip, (size_t)nread - skip + 1);
++                  break;
++                }
++            }
++
++          if (window < out_len - 1)
++            {
++              size_t next_window = window * 2;
++
++              if (next_window <= window || next_window > out_len - 1)
++                {
++                  next_window = out_len - 1;
++                }
++
++              window = next_window;
++              continue;
++            }
++
 +          out[0] = '\0';
 +        }
++
++      break;
 +    }
 +
++  close(fd);
 +  return 0;
 +}
 +
