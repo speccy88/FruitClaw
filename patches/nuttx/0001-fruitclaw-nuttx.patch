@@ -1,921 +1,310 @@
-diff --git a/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-audio-optimization-notes.md b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-audio-optimization-notes.md
-new file mode 100644
-index 0000000000..37e2c376c5
---- /dev/null
-+++ b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-audio-optimization-notes.md
-@@ -0,0 +1,326 @@
-+# FruitClaw DVI And Audio Optimization Notes
-+
-+Date: 2026-07-04
-+
-+This is a backlog note for fixing DVI jitter, screen noise, and dropped frames
-+while RTTTL tunes are playing on the Adafruit Fruit Jam RP2350 `esp-hosted`
-+FruitClaw build.  These are investigation notes, not completed fixes.
-+
-+## Observed Behavior
-+
-+RTTTL playback works again, but playing tunes can cause visible DVI disturbance:
-+
-+- screen noise
-+- jitter
-+- dropped frames
-+- unstable display while audio is active
-+
-+This should not be treated as normal.  Audio playback should be able to run
-+without corrupting the HSTX DVI stream.
-+
-+## Current Known Build Shape
-+
-+Current live build references:
-+
-+```text
-+nuttx/.config
-+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig
-+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/TRMNL_DVI_TIMING.md
-+nuttx/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-rtttl-recovery.md
-+```
-+
-+Known-good FruitClaw DVI profile:
-+
-+```text
-+CONFIG_RP23XX_HSTX_DVI=y
-+CONFIG_RP23XX_HSTX_DVI_BOOT_AUTOSTART=y
-+CONFIG_RP23XX_HSTX_DVI_FB_RGB565_320X240=y
-+CONFIG_RP23XX_HSTX_DVI_OUTPUT_SCALING=1
-+CONFIG_RP23XX_HSTX_DVI_PIXEL_CLOCK=25200000
-+CONFIG_RP23XX_HSTX_DVI_SCANOUT_PSRAM=y
-+CONFIG_RP23XX_HSTX_DVI_SINGLE_SCANOUT_INTERNAL=y
-+```
-+
-+Known audio and DMA-related settings:
-+
-+```text
-+CONFIG_RP23XX_I2S=y
-+CONFIG_RP23XX_I2S_PIO=1
-+CONFIG_RP23XX_I2S_PIO_SM=0
-+CONFIG_RP23XX_I2S_DATA=24
-+CONFIG_RP23XX_I2S_CLOCK=26
-+CONFIG_RP23XX_I2S_DATALEN=16
-+CONFIG_RP23XX_I2S_MAXINFLIGHT=16
-+CONFIG_AUDIO_NUM_BUFFERS=2
-+CONFIG_AUDIO_BUFFER_NUMBYTES=8192
-+CONFIG_SYSTEM_RTTTL_SAMPLERATE=44100
-+CONFIG_SYSTEM_RTTTL_VOLUME=85
-+CONFIG_RP23XX_DMAC=y
-+CONFIG_RP23XX_SPI_DMA=y
-+CONFIG_RP23XX_PIO_USBHOST_DMA_CHANNEL=9
-+CONFIG_SERIAL_TXDMA=y
-+CONFIG_SERIAL_RXDMA=y
-+```
-+
-+Other relevant devices/features in this profile:
-+
-+```text
-+CONFIG_WS2812=y
-+CONFIG_WS2812_NON_SPI_DRIVER=y
-+CONFIG_WS2812_FREQUENCY=800000
-+CONFIG_RP23XX_BOARD_HAS_WS2812=y
-+```
-+
-+## Working Theory
-+
-+The HSTX DVI stream is hard real-time.  It needs predictable DMA and memory
-+service at the pixel rate.  RTTTL playback adds audio synthesis, audio buffer
-+refills, I2S/PIO/DMA activity, and audio-related interrupts.
-+
-+The visible display disturbance probably comes from one or more of these:
-+
-+- audio buffer refill bursts blocking DVI refresh/copy work
-+- DMA contention between HSTX DVI, I2S, SPI, serial, or USB host
-+- interrupt latency during RTTTL synthesis or audio driver work
-+- framebuffer refresh/copy from PSRAM to internal scanout happening while audio
-+  playback is active
-+- too-small audio buffers causing frequent refill activity
-+- RTTTL sample rate higher than needed for simple tunes
-+- unrelated load such as SD writes, Wi-Fi, Telegram, MCP, NeoPixels, or logging
-+  happening during playback
-+
-+The DVI recovery note already established that internal SRAM scanout is needed
-+for this monitor.  That does not automatically eliminate all jitter if other
-+work blocks DVI copy/refresh timing or competes for DMA/memory at bad moments.
-+
-+## Optimization Ideas To Validate
-+
-+### 1. Increase Audio Buffering
-+
-+Current audio buffers:
-+
-+```text
-+CONFIG_AUDIO_NUM_BUFFERS=2
-+CONFIG_AUDIO_BUFFER_NUMBYTES=8192
-+```
-+
-+Hypothesis:
-+
-+Two buffers may cause frequent audio refill pressure.  More or larger buffers
-+could make audio playback less bursty and give DVI more predictable timing.
-+
-+Possible tests:
-+
-+```text
-+CONFIG_AUDIO_NUM_BUFFERS=4
-+CONFIG_AUDIO_BUFFER_NUMBYTES=8192
-+
-+CONFIG_AUDIO_NUM_BUFFERS=4
-+CONFIG_AUDIO_BUFFER_NUMBYTES=16384
-+```
-+
-+Validation:
-+
-+- RTTTL still plays without underruns.
-+- DVI noise is reduced or gone.
-+- RAM usage remains acceptable.
-+- MCP, Telegram, telnet, and NSH still work.
-+
-+### 2. Lower RTTTL Sample Rate
-+
-+Current RTTTL sample rate:
-+
-+```text
-+CONFIG_SYSTEM_RTTTL_SAMPLERATE=44100
-+```
-+
-+Hypothesis:
-+
-+RTTTL tunes do not need 44.1 kHz quality.  A lower sample rate should reduce
-+synthesis and transfer pressure.
-+
-+Possible tests:
-+
-+```text
-+CONFIG_SYSTEM_RTTTL_SAMPLERATE=22050
-+CONFIG_SYSTEM_RTTTL_SAMPLERATE=16000
-+```
-+
-+Validation:
-+
-+- Audio remains acceptable for alerts and tunes.
-+- Screen noise decreases.
-+- CPU and DMA pressure decrease.
-+
-+### 3. Avoid Framebuffer Refresh During Audio
-+
-+Hypothesis:
-+
-+If the framebuffer is static while RTTTL plays, FruitClaw should avoid
-+unnecessary DVI framebuffer writes or refresh-copy work.  Static image playback
-+does not need continuous app framebuffer updates.
-+
-+Ideas:
-+
-+- Add an audio-active flag that tells UI/tool code not to redraw while a tune is
-+  playing.
-+- Avoid `dvictrl pattern`, framebuffer tests, or LVGL redraws during RTTTL.
-+- If practical, add a DVI ioctl or helper to defer nonessential updates during
-+  audio playback.
-+
-+Validation:
-+
-+- `dvictrl info` counters before/after playback.
-+- No increase in `missed`, `max_frame_gap`, or `dma_errors`.
-+
-+### 4. Prioritize DVI DMA/IRQ Over Audio
-+
-+Hypothesis:
-+
-+HSTX DVI should win over audio, SPI, serial, and USB host when timing conflicts
-+occur.  Audio can tolerate buffering; DVI cannot tolerate missed scanout timing.
-+
-+Things to inspect:
-+
-+- DVI DMA channel priority and IRQ priority.
-+- I2S DMA channel priority and IRQ priority.
-+- SPI DMA priority.
-+- Serial DMA priority.
-+- PIO USB host DMA channel usage.
-+
-+Validation:
-+
-+- DVI remains stable while RTTTL plays.
-+- Audio still plays without severe underrun.
-+- USB host and serial do not regress badly.
-+
-+### 5. Pre-render Or Smooth RTTTL Generation
-+
-+Hypothesis:
-+
-+RTTTL synthesis may be too bursty when generating data during playback.  A
-+pre-rendered or more evenly chunked path could reduce CPU timing spikes.
-+
-+Ideas:
-+
-+- Pre-render short tunes to a buffer before enabling playback.
-+- Generate larger chunks less often if memory allows.
-+- Generate smaller chunks on a dedicated cadence if that avoids long CPU bursts.
-+- Add a FruitClaw `rtttl.play` path that uses a board-friendly playback mode
-+  instead of the most generic command behavior.
-+
-+Validation:
-+
-+- Compare the generic `rtttl` command with FruitClaw tool playback.
-+- Measure DVI counters and subjective display stability.
-+
-+### 6. Reduce Background Load During Audio Tests
-+
-+When testing DVI/audio coexistence, disable or avoid:
-+
-+- Wi-Fi throughput tests
-+- Telegram polling stress
-+- MCP tool storms
-+- SD writes or directory scans
-+- NeoPixel effects
-+- LVGL redraw loops
-+- verbose serial logging
-+- USB host device probing
-+
-+Once the baseline is stable, reintroduce services one by one.
-+
-+### 7. Check NeoPixel Timing Interactions
-+
-+NeoPixels use timing-sensitive output.  If NeoPixel effects run while RTTTL and
-+DVI are active, they may make timing problems worse.
-+
-+Test cases:
-+
-+```text
-+DVI only
-+DVI + RTTTL
-+DVI + NeoPixel static color
-+DVI + NeoPixel effect
-+DVI + RTTTL + NeoPixel effect
-+```
-+
-+Acceptance:
-+
-+- Static NeoPixel color should not disturb DVI.
-+- Effects should not run if they destabilize DVI/audio.
-+
-+### 8. Add A FruitClaw "Display-Safe Audio Mode"
-+
-+Possible release behavior:
-+
-+- Before RTTTL playback, pause optional display updates and nonessential LED
-+  effects.
-+- Play the tune with conservative sample rate and larger buffers.
-+- Resume normal updates after playback.
-+- Keep watchdog/guard heartbeat alive.
-+
-+This would be acceptable for an operator agent because RTTTL is mostly for
-+alerts, not high-fidelity continuous audio.
-+
-+## Suggested Test Matrix
-+
-+For each test build, record:
-+
-+```text
-+Build date:
-+UF2 sha256:
-+DVI profile:
-+DVI scanout mode:
-+RTTTL sample rate:
-+Audio buffers:
-+I2S max in-flight:
-+DMA/IRQ priority changes:
-+FruitClaw services running:
-+Tune used:
-+dvictrl info before:
-+dvictrl info after:
-+Visible DVI noise:
-+Dropped frames:
-+Audio result:
-+Notes:
-+```
-+
-+Minimum useful commands:
-+
-+```sh
-+dvictrl info
-+rtttl -v 100 -r 44100 "tone:d=1,o=5,b=60:c"
-+dvictrl info
-+rtttl simpsons
-+dvictrl info
-+```
-+
-+Also test the lower sample-rate path:
-+
-+```sh
-+rtttl -v 100 -r 22050 "tone:d=1,o=5,b=60:c"
-+```
-+
-+Important `dvictrl info` fields to compare:
-+
-+```text
-+frames
-+errors
-+refresh: copies
-+refresh: missed
-+timing: max_copy
-+timing: max_frame_gap
-+timing: dma_errors
-+```
-+
-+## Acceptance Target
-+
-+For the FruitClaw operator build:
-+
-+- RTTTL tunes are audible.
-+- DVI does not show visible noise or lose sync during RTTTL playback.
-+- Occasional UI frame delay is acceptable.
-+- HSTX scanout corruption is not acceptable.
-+- Audio tuning must not regress the known-good `320x240` RGB565 DVI mode.
-+- Fixes must preserve BOOTSEL/watchdog recovery while alpha testing continues.
-+
-diff --git a/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-rtttl-recovery.md b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-rtttl-recovery.md
-new file mode 100644
-index 0000000000..0a5dd90838
---- /dev/null
-+++ b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-dvi-rtttl-recovery.md
-@@ -0,0 +1,278 @@
-+# FruitClaw DVI and RTTTL Recovery Note
-+
-+Date: 2026-07-04
-+
-+This note records the known-good FruitClaw alpha fix for two regressions on the
-+Adafruit Fruit Jam RP2350 `esp-hosted` profile:
-+
-+- DVI was black even though `/dev/fb0` existed.
-+- RTTTL commands returned without an obvious error, but no sound came out.
-+
-+The working baseline is the FruitClaw operator build, not the TRMNL build:
-+
-+- Framebuffer: `320x240`, `RGB565`
-+- Output timing: `640x480`, 1:1 centered/scaled by the HSTX DVI driver
-+- Pixel clock: `25.2 MHz`
-+- System clock: `252 MHz`
-+- Audio output: `/dev/audio/pcm0` through the Fruit Jam TLV320DAC3100 path
-+
-+Do not use this note as proof that the TRMNL `800x480` 2 bpp profile is active.
-+FruitClaw intentionally uses the safe color `320x240` operator profile.
-+
-+## Known-Good Artifact
-+
-+The image flashed and validated during this recovery was:
-+
-+```text
-+/Users/fred/Documents/FruitClaw-rebuild/nuttx/nuttx.uf2
-+sha256: 91a13a8f452046a90a428bb81962bfe633e8ccb371cbbeb0bfd6ca9dcfc52cdd
-+NuttX uname timestamp: Jul  4 2026 07:26:55
-+```
-+
-+Build size reported by the linker:
-+
-+```text
-+FLASH: 1200456 B / 16 MB
-+RAM:    224864 B / 512 KB
-+```
-+
-+## DVI Fix
-+
-+The FruitClaw DVI profile should keep the application framebuffer in PSRAM, but
-+use the internal SRAM single scanout buffer for the live HSTX DMA stream.  This
-+was the important stability fix for the picky HDMI monitor.
-+
-+Required config in:
-+
-+```text
-+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig
-+```
-+
-+Known-good DVI symbols:
-+
-+```text
-+CONFIG_RP23XX_HSTX_DVI_FB_RGB565_320X240=y
-+CONFIG_RP23XX_HSTX_DVI_OUTPUT_SCALING=1
-+CONFIG_RP23XX_HSTX_DVI_PIXEL_CLOCK=25200000
-+CONFIG_RP23XX_HSTX_DVI_SCANOUT_PSRAM=y
-+CONFIG_RP23XX_HSTX_DVI_SINGLE_SCANOUT_INTERNAL=y
-+```
-+
-+Why this matters:
-+
-+- Full PSRAM scanout could leave this display black or unstable.
-+- Internal SRAM scanout keeps the HSTX DMA stream stable.
-+- The application framebuffer can still live in PSRAM.
-+- The validated runtime showed `scanout: [0]=... sram=1`.
-+
-+Expected `dvictrl info` lines:
-+
-+```text
-+video: 320x240 fmt=11 planes=1
-+dvi: fb=320x240 output=640x480 scale=1 bpp=16 bytes=153600
-+clock: sys=252000000 peri=252000000 hstx=126000000 target_pixel=25200000 actual_pixel=25200000 clkdiv=5
-+scanout: framebuffer
-+buffers: count=2 split=yes
-+scanout: [0]=... sram=1
-+dma_errors=0
-+```
-+
-+Smoke test:
-+
-+```sh
-+dvictrl info
-+dvictrl pattern colorbars
-+```
-+
-+If the screen is black again, first verify that
-+`CONFIG_RP23XX_HSTX_DVI_SINGLE_SCANOUT_INTERNAL=y` survived the last config
-+regeneration.
-+
-+## RTTTL Audio Fix
-+
-+Symptom:
-+
-+- `/dev/audio/pcm0` exists.
-+- `/dev/i2schar0` exists.
-+- `rtttl` accepts a tune and returns to the prompt.
-+- No audible sound plays.
-+
-+Root cause:
-+
-+The Fruit Jam ESP32-C6 coprocessor reset line and the TLV320DAC3100 audio DAC
-+reset line share the NINA reset GPIO.  Audio was initialized during board
-+bring-up, then `board_fruitjam_esp_hosted_start()` could later start
-+ESP-Hosted and toggle that shared reset line.  That reset erased the DAC register
-+configuration while the NuttX audio device remained registered, so RTTTL looked
-+alive but the external DAC was effectively unconfigured or muted.
-+
-+Source files involved:
-+
-+```text
-+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_fruitjam_audio.c
-+nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_bringup.c
-+nuttx/drivers/wireless/esp_hosted.c
-+nuttx/boards/arm/rp23xx/common/src/rp23xx_i2sdev.c
-+```
-+
-+The fix was to add a Fruit Jam codec reinitialize hook in
-+`rp23xx_fruitjam_audio.c`:
-+
-+```c
-+int fruitjam_audio_codec_reinitialize(void)
-+{
-+  g_codec_initialized = false;
-+  return board_i2sdev_codec_initialize(0);
-+}
-+```
-+
-+The first recovery fix called it after successful ESP-Hosted initialization in
-+`board_fruitjam_esp_hosted_start()`:
-+
-+```c
-+ret = fruitjam_esp_hosted_initialize();
-+if (ret >= 0)
-+  {
-+    g_fruitjam_esp_hosted_started = true;
-+    ret = fruitjam_audio_codec_reinitialize();
-+    ...
-+    ret = OK;
-+  }
-+```
-+
-+This forces the TLV320DAC3100 register script to run again after the shared
-+ESP/DAC reset.
-+
-+## Shared Wi-Fi/Audio Reset Hardening
-+
-+Date: 2026-07-05
-+
-+The alpha build now treats ESP-hosted Wi-Fi reset and I2S codec recovery as one
-+board-level hardware domain:
-+
-+- `fruitjam_esp_hosted_reset()` marks the audio codec state dirty whenever it
-+  asserts the shared NINA reset line.
-+- `board_fruitjam_esp_hosted_start()` refreshes the audio codec after
-+  ESP-hosted initialization even if `wlan0` readiness later times out.
-+- Repeated `board_fruitjam_esp_hosted_start()` calls repair audio if a later
-+  ESP-hosted reset dirtied the codec state.
-+- `board_fruitjam_shared_reset_recover()` is the public board helper for tools
-+  that need a known-good shared reset state before touching audio or Wi-Fi.
-+- `rtttl` calls `board_fruitjam_shared_reset_recover()` before opening
-+  `/dev/audio/pcm0`, so manual NSH tests and FruitClaw `rtttl.play` tool calls
-+  both use the same recovery path.
-+
-+This means a Wi-Fi reset should no longer leave the TLV320DAC3100 silently
-+unconfigured, and an RTTTL test should not depend on the ESP-hosted wait-ready
-+result as long as the codec can be reinitialized over I2C.
-+
-+If RTTTL fails through FruitClaw, inspect both fields in the tool result:
-+
-+```json
-+{"status":65280,"exit_code":255}
-+```
-+
-+`status` is the raw `system()` wait status; `exit_code` is the decoded child
-+exit status.
-+
-+Known-good audio config:
-+
-+```text
-+CONFIG_RP23XX_I2S=y
-+CONFIG_RP23XX_I2S_DATA=24
-+CONFIG_RP23XX_I2S_CLOCK=26
-+CONFIG_AUDIO=y
-+CONFIG_AUDIO_I2S=y
-+CONFIG_AUDIO_I2SCHAR=y
-+CONFIG_AUDIOUTILS_RTTTL_C=y
-+CONFIG_SYSTEM_RTTTL=y
-+CONFIG_SYSTEM_RTTTL_DEVPATH="/dev/audio/pcm0"
-+CONFIG_SYSTEM_RTTTL_SAMPLERATE=44100
-+CONFIG_SYSTEM_RTTTL_VOLUME=85
-+```
-+
-+Useful checks:
-+
-+```sh
-+ls /dev
-+i2c dev 0 0x18
-+i2c get -a 0x18 -r 0x40
-+rtttl -v 100 -r 44100 "tone:d=1,o=5,b=60:c"
-+```
-+
-+For the recovered build, `i2c get -a 0x18 -r 0x40` returned `00`, and the
-+single long `rtttl` tone was audible.
-+
-+If RTTTL is silent again:
-+
-+1. Confirm `/dev/audio/pcm0` exists.
-+2. Confirm the DAC responds at I2C address `0x18`.
-+3. Confirm the ESP-Hosted start path still calls
-+   `fruitjam_audio_codec_reinitialize()`.
-+4. Do not assume `/dev/audio/pcm0` means the external DAC is still configured.
-+5. Run one RTTTL command at a time and wait for the NSH prompt before sending
-+   another command.
-+
-+## BOOTSEL Guard Notes
-+
-+During alpha testing, BOOTSEL recovery guards may still be enabled:
-+
-+```text
-+CONFIG_FRUITCLAW_GUARD_BOOTSEL_RECOVERY=y
-+CONFIG_FRUITCLAW_MAX_UPTIME_GUARD_MS=600000
-+```
-+
-+If the board lands in BOOTSEL with reboot parameter `0x46435347` (`FCSG`), that
-+is the FruitClaw guard marker.  After a successful flash, a plain reboot can be
-+enough to enter the app:
-+
-+```sh
-+picotool reboot
-+```
-+
-+For production, the long forced BOOTSEL timeout should be disabled or converted
-+to reset-only behavior after the release is fully tested.
-+
-+## Rebuild And Flash
-+
-+Known-good local build command:
-+
-+```sh
-+cd /Users/fred/Documents/FruitClaw-rebuild/nuttx
-+PATH=$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH make -j8
-+```
-+
-+Enter BOOTSEL from serial if CDC is alive:
-+
-+```sh
-+python3 - <<'PY'
-+import serial, time
-+ser = serial.Serial('/dev/cu.usbmodem01', 1200, timeout=0.2)
-+ser.dtr = False
-+ser.rts = False
-+time.sleep(0.35)
-+ser.close()
-+PY
-+```
-+
-+Flash:
-+
-+```sh
-+picotool load -x nuttx.uf2
-+```
-+
-+Post-flash checks:
-+
-+```sh
-+uname -a
-+dvictrl info
-+dvictrl pattern colorbars
-+i2c get -a 0x18 -r 0x40
-+rtttl -v 100 -r 44100 "tone:d=1,o=5,b=60:c"
-+```
-+
-+Expected outcome:
-+
-+- DVI shows color bars.
-+- `dvictrl info` reports `actual_pixel=25200000` and internal SRAM scanout.
-+- RTTTL produces an audible tone.
-diff --git a/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-issue-list.md b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-issue-list.md
-new file mode 100644
-index 0000000000..ab94023772
---- /dev/null
-+++ b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-issue-list.md
-@@ -0,0 +1,19 @@
-+# FruitClaw Issue List
-+
-+Date started: 2026-07-04
-+
-+Append one checklist line per issue.  Keep deep explanations in separate notes.
-+
-+- [ ] 2026-07-04: ESP-Hosted Wi-Fi has high jitter and packet loss under `ping 8.8.8.8`; see `fruitclaw-network-optimization-notes.md`.
-+- [ ] 2026-07-05: `fruitclaw wifi-up --force` reported command-stage success even when `ping 8.8.8.8` had 100% packet loss; IPv4/default-gateway verification and clearer `status-net` diagnostics patched, pending flash and live Wi-Fi validation.
-+- [ ] 2026-07-04: DVI shows noise, jitter, or dropped frames while RTTTL tunes play; see `fruitclaw-dvi-audio-optimization-notes.md`.
-+- [ ] 2026-07-04: SD card operations such as `cd /mnt/sd0`, `ls`, or `cat` have reportedly hung the board and need root-cause validation.
-+- [x] 2026-07-04: `ls /examples` could wedge after partial ROMFS listings; mitigated for alpha by disabling the baked examples ROMFS and populating `/examples` as a two-file tmpfs help directory; flashed and verified the shell still responds after stress.
-+- [ ] 2026-07-04: Repeated automated `ls /examples` stress can still drop a displayed filename after hundreds of iterations while returning the prompt; investigate CDC output loss vs tmpfs readdir behavior, but it no longer reproduces the hard hang.
-+- [ ] 2026-07-04: Telnet availability and reliability need revalidation after Wi-Fi autostart and network tuning.
-+- [ ] 2026-07-04: Credential entry and persistence need revalidation on SD-backed FruitClaw data paths without hidden input blocking usability.
-+- [ ] 2026-07-04: NeoPixel tools reportedly stopped working during alpha testing and need a repeatable stress/recovery test.
-+- [ ] 2026-07-05: `rtttl.play`/RTTTL audio path can return status 65280 with empty captured output after live FruitClaw MCP testing; shared Wi-Fi/audio reset recovery patched, pending flash and audible hardware validation.
-+- [ ] 2026-07-04: BOOTSEL guard is intentionally enabled for alpha but production should switch to reset-only recovery unless explicitly requested.
-+- [x] 2026-07-04: `vi` save from `tio` failed because colon commands only handled LF; patched `apps/system/vi/vi.c` to accept CR and verified `:wq` with Return on SD.
-+- [x] 2026-07-04: `vi hello.be` on FAT wrongly reported "not a regular file" for a new file after the first guard patch; fixed by checking only for directories with `opendir()` and verified new `.be` create/save on SD.
-diff --git a/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-network-optimization-notes.md b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-network-optimization-notes.md
-new file mode 100644
-index 0000000000..ece112feec
---- /dev/null
-+++ b/Documentation/platforms/arm/rp23xx/boards/adafruit-fruit-jam-rp2350/fruitclaw-network-optimization-notes.md
-@@ -0,0 +1,271 @@
-+# FruitClaw Network Optimization Notes
-+
-+Date: 2026-07-04
-+
-+This is a backlog note for future FruitClaw Wi-Fi and ESP-Hosted optimization.
-+It records the current observed behavior, the likely bottlenecks, and the
-+specific things to test later.  These are not completed fixes.
-+
-+## Observed Behavior
-+
-+On the FruitClaw alpha build, `ping 8.8.8.8` worked but showed high jitter and
-+late packets:
-+
-+```text
-+10 packets transmitted, 9 received, 10% packet loss
-+rtt min/avg/max = 20.000/358.888/890.000 ms
-+
-+10 packets transmitted, 6 received, 40% packet loss
-+rtt min/avg/max = 20.000/383.333/630.000 ms
-+```
-+
-+The pattern included very fast replies mixed with delayed replies around
-+`600-1000 ms`.  That does not look like the best achievable performance.  It
-+looks more like a transport, scheduling, buffering, or Wi-Fi power-save issue
-+than a hard limit of the board.
-+
-+## Current Known Knobs
-+
-+Current live build references:
-+
-+```text
-+nuttx/.config
-+nuttx/drivers/wireless/esp_hosted.c
-+```
-+
-+Relevant current settings:
-+
-+```text
-+CONFIG_ESP_HOSTED_SPI_FREQUENCY=5000000
-+CONFIG_ESP_HOSTED_LPWORK=y
-+CONFIG_IOB_NBUFFERS=24
-+CONFIG_IOB_NCHAINS=24
-+ESP_HOSTED_RX_WORK_DRAIN_LIMIT=8
-+ESP_HOSTED_NETDEV_RX_QUOTA=4
-+ESP_HOSTED_NETDEV_TX_QUOTA=2
-+```
-+
-+The current transport is ESP-Hosted over SPI.  NuttX sees a normal `wlan0`
-+network interface, but the Wi-Fi radio and firmware run on the ESP32-C6
-+coprocessor.
-+
-+## Optimization Ideas To Validate
-+
-+### 1. Increase ESP-Hosted SPI Clock
-+
-+The current SPI frequency is only `5 MHz`:
-+
-+```text
-+CONFIG_ESP_HOSTED_SPI_FREQUENCY=5000000
-+```
-+
-+Test candidates:
-+
-+```text
-+10 MHz
-+20 MHz
-+maybe higher if stable
-+```
-+
-+Validation:
-+
-+- Boot reliably.
-+- Join Wi-Fi reliably.
-+- Ping gateway and `8.8.8.8`.
-+- Run Telegram polling and MCP server at the same time.
-+- Confirm no SPI errors, network stalls, or board hangs.
-+
-+If higher SPI clocks become unstable, keep the fastest clock that survives a
-+repeatable soak test.
-+
-+### 2. Move ESP-Hosted RX Work Off LPWORK
-+
-+Current config:
-+
-+```text
-+CONFIG_ESP_HOSTED_LPWORK=y
-+```
-+
-+Hypothesis:
-+
-+Network RX work on LPWORK can be delayed by other lower-priority work.  That can
-+show up as late ICMP replies, MCP stalls, or bursty Telegram behavior.
-+
-+Test:
-+
-+- Try the HPWORK variant if available.
-+- Compare ping jitter with no FruitClaw services running.
-+- Compare ping jitter with FruitClaw MCP and Telegram running.
-+- Watch for regressions in boot stability and CPU starvation.
-+
-+### 3. Increase RX Drain And Netdev Quotas
-+
-+Current driver constants:
-+
-+```text
-+ESP_HOSTED_RX_WORK_DRAIN_LIMIT=8
-+ESP_HOSTED_NETDEV_RX_QUOTA=4
-+ESP_HOSTED_NETDEV_TX_QUOTA=2
-+```
-+
-+Hypothesis:
-+
-+Small RX/TX quotas may cause packet bursts to drain over several scheduler
-+turns.  That could explain alternating fast and slow ping replies.
-+
-+Possible tests:
-+
-+```text
-+RX drain: 8 -> 16 -> 32
-+RX quota: 4 -> 8 -> 16
-+TX quota: 2 -> 4 -> 8
-+```
-+
-+Validation:
-+
-+- ICMP latency.
-+- MCP tool response time.
-+- Telegram long-poll coexistence.
-+- Heap and IOB availability.
-+- No starvation of DVI, audio, SD, or shell.
-+
-+### 4. Increase IOB Buffers And Chains
-+
-+Current config:
-+
-+```text
-+CONFIG_IOB_NBUFFERS=24
-+CONFIG_IOB_NCHAINS=24
-+```
-+
-+Hypothesis:
-+
-+The current IOB pool may be too small for simultaneous MCP, Telegram polling,
-+HTTP client, telnet, and other network activity.
-+
-+Possible tests:
-+
-+```text
-+CONFIG_IOB_NBUFFERS=48
-+CONFIG_IOB_NCHAINS=48
-+```
-+
-+Then test larger values only if memory allows.
-+
-+Validation:
-+
-+- `/proc` IOB information, if available.
-+- `free` before and after network load.
-+- MCP and Telegram simultaneous traffic.
-+- Long-running soak without deadlock or packet starvation.
-+
-+### 5. Check ESP32-C6 Wi-Fi Power Save
-+
-+Hypothesis:
-+
-+Wi-Fi power-save on the coprocessor may create periodic latency spikes.  This is
-+especially suspicious when ping alternates between very low latency and almost
-+one-second replies.
-+
-+Things to investigate:
-+
-+- Whether the ESP-Hosted MCU firmware enables station power-save by default.
-+- Whether there is an RPC/control path to disable or reduce power-save.
-+- Whether the ESP32-C6 firmware should be rebuilt with a no-power-save default
-+  for FruitClaw operator mode.
-+
-+Validation:
-+
-+- Gateway ping before/after.
-+- `8.8.8.8` ping before/after.
-+- Telegram and MCP responsiveness while idle.
-+
-+### 6. Separate RF Problems From Board Problems
-+
-+Always test in this order:
-+
-+```sh
-+ifconfig
-+ping <router-ip>
-+ping 8.8.8.8
-+```
-+
-+Interpretation:
-+
-+- Bad router ping means the issue is local: board, ESP32-C6, SPI transport,
-+  Wi-Fi link, power save, or scheduling.
-+- Good router ping but bad `8.8.8.8` ping means the board path may be fine and
-+  the issue is WAN, DNS, routing, or internet path.
-+
-+Also compare while FruitClaw services are stopped versus while MCP and Telegram
-+are active.
-+
-+### 7. Reduce Background Load During Network Tests
-+
-+When measuring raw network behavior, try to avoid unrelated load:
-+
-+- DVI stress patterns.
-+- Heavy SD writes.
-+- Berry scripts.
-+- MCP tool storms.
-+- Telegram long polling.
-+- Verbose debug logging.
-+
-+After raw behavior is understood, re-enable services and measure coexistence.
-+
-+### 8. Consider SDIO Later
-+
-+SPI should perform better than the current results, so first optimize SPI.
-+
-+For a larger future improvement, evaluate ESP-Hosted over SDIO if the board
-+wiring and NuttX driver support make it practical.  SDIO would be a bigger
-+architecture change and should not block FruitClaw alpha stabilization.
-+
-+## Suggested Test Matrix
-+
-+For each candidate change, record:
-+
-+```text
-+Build date:
-+UF2 sha256:
-+ESP32-C6 firmware build:
-+SPI clock:
-+Workqueue mode:
-+IOB buffers/chains:
-+RX drain/quota:
-+TX quota:
-+FruitClaw services running:
-+Gateway ping min/avg/max/loss:
-+8.8.8.8 ping min/avg/max/loss:
-+MCP smoke result:
-+Telegram smoke result:
-+Notes:
-+```
-+
-+Minimum useful smoke:
-+
-+```sh
-+ifconfig
-+ping <router-ip>
-+ping 8.8.8.8
-+fruitclaw status
-+fruitclaw telegram-test
-+fruitclaw mcp-smoke
-+```
-+
-+If there is no `fruitclaw mcp-smoke` command in the current build, use the
-+Hermes MCP test from the host instead.
-+
-+## Acceptance Target
-+
-+This does not need desktop-class Wi-Fi performance, but it should be much better
-+than the current alpha results.
-+
-+Target for a usable FruitClaw operator build:
-+
-+- Gateway ping: low packet loss, mostly stable latency.
-+- Internet ping: no regular one-second stalls under idle conditions.
-+- MCP and Telegram can run together without starving each other.
-+- Network tuning does not regress DVI, RTTTL/audio, SD, NSH, telnet, or
-+  watchdog/BOOTSEL recovery behavior.
-+
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+deleted file mode 100644
+index 5ace4600a1..0000000000
+--- a/.github/dependabot.yml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-version: 2
+-updates:
+-  - package-ecosystem: "github-actions"
+-    directory: "/"
+-    schedule:
+-      interval: "weekly"
+diff --git a/.github/membrowse-targets.json b/.github/membrowse-targets.json
+deleted file mode 100644
+index c105a92196..0000000000
+--- a/.github/membrowse-targets.json
++++ /dev/null
+@@ -1,83 +0,0 @@
+-[
+-  {
+-    "target_name": "stm32-nucleo-f103rb",
+-    "board_config": "nucleo-f103rb:nsh",
+-    "elf": "nuttx",
+-    "ld": "boards/arm/stm32f1/nucleo-f103rb/scripts/ld.script",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "arduino-mega2560",
+-    "board_config": "arduino-mega2560:nsh",
+-    "elf": "nuttx.elf",
+-    "ld": "boards/avr/atmega/arduino-mega2560/scripts/flash.ld",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "qemu-armv8a",
+-    "board_config": "qemu-armv8a:nsh",
+-    "elf": "nuttx",
+-    "ld": "",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "mirtoo",
+-    "board_config": "mirtoo:nsh",
+-    "elf": "nuttx",
+-    "ld": "boards/mips/pic32mx/mirtoo/scripts/pinguino-debug.ld",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": "-d MIPS32_TOOLCHAIN_GNU_ELF -e MIPS32_TOOLCHAIN_PINGUINOL"
+-  },
+-  {
+-    "target_name": "hifive1-revb",
+-    "board_config": "hifive1-revb:nsh",
+-    "elf": "nuttx",
+-    "ld": "boards/risc-v/fe310/hifive1-revb/scripts/ld.script",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "rx65n-rsk2mb",
+-    "board_config": "rx65n-rsk2mb:nsh",
+-    "elf": "nuttx",
+-    "ld": "boards/renesas/rx65n/rx65n-rsk2mb/scripts/linker_script.ld",
+-    "map_file": "",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "s698pm-dkit",
+-    "board_config": "s698pm-dkit:nsh",
+-    "elf": "nuttx",
+-    "ld": "",
+-    "map_file": "",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "qemu-intel64",
+-    "board_config": "qemu-intel64:nsh",
+-    "elf": "nuttx",
+-    "ld": "",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  },
+-  {
+-    "target_name": "esp32-devkitc",
+-    "board_config": "esp32-devkitc:nsh",
+-    "elf": "nuttx",
+-    "ld": "boards/xtensa/esp32/common/scripts/flat_memory.ld.tmp boards/xtensa/esp32/common/scripts/esp32_sections.ld.tmp",
+-    "map_file": "nuttx.map",
+-    "linker_vars": "",
+-    "config_overrides": ""
+-  }
+-]
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index d7405cfb34..1e2d0bdc87 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -21,14 +21,6 @@ on:
+       - "Documentation/**"
+       - "tools/ci/docker/linux/**"
+       - "tools/codeowners/*"
+-  push:
+-    paths-ignore:
+-      - "AUTHORS"
+-      - "CONTRIBUTING.md"
+-      - "Documentation/**"
+-    branches:
+-      - "releases/*"
+-    tags:
+ 
+ permissions:
+   contents: read
+diff --git a/.github/workflows/doc.yml b/.github/workflows/doc.yml
+index c1678a7d9c..f28109cb7f 100644
+--- a/.github/workflows/doc.yml
++++ b/.github/workflows/doc.yml
+@@ -14,12 +14,6 @@
+ name: "Build Documentation"
+ 
+ on:
+-  push:
+-    branches:
+-      - master
+-    paths:
+-      - 'Documentation/**'
+-
+   pull_request:
+     paths:
+       - 'Documentation/**'
+diff --git a/.github/workflows/docker_linux.yml b/.github/workflows/docker_linux.yml
+index bab77da7fe..70d62695cd 100644
+--- a/.github/workflows/docker_linux.yml
++++ b/.github/workflows/docker_linux.yml
+@@ -14,13 +14,6 @@ name: Docker-Linux
+ 
+ on:
+   workflow_dispatch:
+-  push:
+-    # Publish `master` as Docker `latest` image.
+-    branches:
+-      - master
+-    paths:
+-      - 'tools/ci/docker/linux/**'
+-      - '.github/workflows/docker_linux.yml'
+ 
+   # Run builds for any PRs.
+   pull_request:
+diff --git a/.github/workflows/membrowse-comment.yml b/.github/workflows/membrowse-comment.yml
+deleted file mode 100644
+index 9fa6ae1ff3..0000000000
+--- a/.github/workflows/membrowse-comment.yml
++++ /dev/null
+@@ -1,42 +0,0 @@
+-name: MemBrowse PR Comment
+-
+-on:
+-  workflow_run:
+-    workflows: [MemBrowse Memory Report]
+-    types:
+-      - completed
+-
+-jobs:
+-  comment:
+-    runs-on: ubuntu-latest
+-    if: >
+-      github.event.workflow_run.event == 'pull_request' &&
+-      github.event.workflow_run.conclusion != 'cancelled'
+-    permissions:
+-      contents: read
+-      pull-requests: write
+-    steps:
+-      - name: Checkout repository
+-        uses: actions/checkout@v7
+-
+-      - uses: actions/setup-python@v6
+-        with:
+-          python-version: '3.11'
+-
+-      - name: Install membrowse
+-        run: pip install --no-cache-dir membrowse
+-
+-      - name: Post combined PR comment
+-        if: ${{ env.MEMBROWSE_API_KEY != '' }}
+-        env:
+-          MEMBROWSE_API_KEY: ${{ secrets.MEMBROWSE_API_KEY }}
+-          MEMBROWSE_API_URL: ${{ vars.MEMBROWSE_API_URL }}
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+-        run: |
+-          SUMMARY_ARGS=("$HEAD_SHA" --api-key "$MEMBROWSE_API_KEY" --json)
+-          if [ -n "$MEMBROWSE_API_URL" ]; then
+-            SUMMARY_ARGS+=(--api-url "$MEMBROWSE_API_URL")
+-          fi
+-          membrowse summary "${SUMMARY_ARGS[@]}" > /tmp/membrowse-summary.json
+-          python -m membrowse.utils.github_comment --summary-json /tmp/membrowse-summary.json
+diff --git a/.github/workflows/membrowse-onboard.yml b/.github/workflows/membrowse-onboard.yml
+deleted file mode 100644
+index 139c42389a..0000000000
+--- a/.github/workflows/membrowse-onboard.yml
++++ /dev/null
+@@ -1,98 +0,0 @@
+-name: Onboard to MemBrowse
+-
+-on:
+-  workflow_dispatch:
+-    inputs:
+-      num_commits:
+-        description: 'Number of commits to process'
+-        required: true
+-        default: '100'
+-        type: string
+-
+-jobs:
+-  load-targets:
+-    runs-on: ubuntu-latest
+-    outputs:
+-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+-    steps:
+-      - uses: actions/checkout@v7
+-      - id: set-matrix
+-        run: echo "matrix=$(jq -c '.' .github/membrowse-targets.json)" >> $GITHUB_OUTPUT
+-
+-  onboard:
+-    needs: load-targets
+-    runs-on: ubuntu-latest
+-    container:
+-      image: ghcr.io/apache/nuttx/apache-nuttx-ci-linux
+-      credentials:
+-        username: ${{ github.actor }}
+-        password: ${{ secrets.GITHUB_TOKEN }}
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        include: ${{ fromJson(needs.load-targets.outputs.matrix) }}
+-
+-    steps:
+-      - name: Checkout nuttx
+-        uses: actions/checkout@v7
+-        with:
+-          fetch-depth: 0
+-
+-      - name: Clone nuttx-apps
+-        run: |
+-          git config --global --add safe.directory '*'
+-          git clone --depth=1 https://github.com/apache/nuttx-apps.git ../apps
+-
+-      - name: Install membrowse
+-        run: python3 -m pip install --no-cache-dir membrowse
+-
+-      - name: Fetch full git history
+-        run: |
+-          git fetch --unshallow || true
+-          git fetch --all
+-
+-      - name: Run MemBrowse Onboard
+-        env:
+-          MEMBROWSE_API_KEY: ${{ secrets.MEMBROWSE_API_KEY }}
+-          MEMBROWSE_API_URL: ${{ vars.MEMBROWSE_API_URL }}
+-          NUM_COMMITS: ${{ github.event.inputs.num_commits }}
+-          TARGET_NAME: ${{ matrix.target_name }}
+-          ELF: ${{ matrix.elf }}
+-          LD: ${{ matrix.ld }}
+-          MAP_FILE: ${{ matrix.map_file }}
+-          LINKER_VARS: ${{ matrix.linker_vars }}
+-        run: |
+-          BUILD_SCRIPT=$(cat <<'BUILD_EOF'
+-          ./tools/configure.sh -l ${{ matrix.board_config }}
+-          echo CONFIG_DEBUG_SYMBOLS=y >> .config
+-          echo CONFIG_DEBUG_LINK_MAP=y >> .config
+-          if [ -n "${{ matrix.config_overrides }}" ]; then
+-            kconfig-tweak ${{ matrix.config_overrides }}
+-          fi
+-          make olddefconfig
+-          find arch -name Makefile -exec sed -i '/DELFILE, $(addsuffix .tmp,$(ARCHSCRIPT))/d' {} +
+-          trap 'git checkout -- arch/' EXIT
+-          make -j$(nproc)
+-          BUILD_EOF
+-          )
+-
+-          ARGS=("$NUM_COMMITS" "$BUILD_SCRIPT" "$ELF" "$TARGET_NAME" "$MEMBROWSE_API_KEY")
+-          if [ -n "$MEMBROWSE_API_URL" ]; then
+-            ARGS+=(--api-url "$MEMBROWSE_API_URL")
+-          fi
+-          if [ -n "$LD" ]; then
+-            ARGS+=(--ld-scripts "$LD")
+-          fi
+-          if [ -n "$LINKER_VARS" ]; then
+-            set -f
+-            for var in $LINKER_VARS; do
+-              ARGS+=(--def "$var")
+-            done
+-            set +f
+-          fi
+-          if [ -n "$MAP_FILE" ]; then
+-            ARGS+=(--map-file "$MAP_FILE")
+-          fi
+-          ARGS+=(--binary-search)
+-
+-          membrowse onboard "${ARGS[@]}"
 diff --git a/arch/arm/src/rp23xx/CMakeLists.txt b/arch/arm/src/rp23xx/CMakeLists.txt
 index b67f08039a..b305881079 100644
 --- a/arch/arm/src/rp23xx/CMakeLists.txt
@@ -11370,10 +10759,10 @@ index 0000000000..1012b27769
 +   the error counters stay clean.
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/Kconfig b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/Kconfig
 new file mode 100644
-index 0000000000..42d2120fd7
+index 0000000000..94384e4009
 --- /dev/null
 +++ b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/Kconfig
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,174 @@
 +#
 +# For a description of the syntax of this configuration file,
 +# see the file kconfig-language.txt in the NuttX tools repository.
@@ -11417,16 +10806,6 @@ index 0000000000..42d2120fd7
 +		Delay ESP-Hosted initialization so USB CDC/NSH can become
 +		interactive before the ESP32-C6 SPI control path starts.  This
 +		keeps the recovery shell available during coprocessor bring-up.
-+
-+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_READY_TIMEOUT_MS
-+	int "ESP-Hosted wlan0 registration timeout in milliseconds"
-+	default 12000
-+	range 0 60000
-+	---help---
-+		Maximum time board_fruitjam_esp_hosted_start() waits for the
-+		ESP-Hosted driver to complete its early control-plane probes and
-+		register wlan0.  Use a non-zero value for FruitClaw-style images so
-+		Wi-Fi setup does not run against a missing network device.
 +
 +endif
 +
@@ -11514,16 +10893,6 @@ index 0000000000..42d2120fd7
 +	default "/examples"
 +
 +endif
-+
-+config ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_TMPFS
-+	bool "Populate volatile example scripts at /examples"
-+	default n
-+	depends on FS_TMPFS
-+	---help---
-+		Mount a tiny tmpfs at /examples and populate it with a small
-+		Fruit Jam smoke-test set during board bring-up.  This is used by
-+		FruitClaw alpha builds to avoid ROMFS directory-listing stalls
-+		while keeping a few quick manual examples available.
 +
 +config RP23XX_WS2812_GPIO_PIN
 +	default 32 if RP23XX_BOARD_HAS_WS2812
@@ -12280,10 +11649,10 @@ index 0000000000..5873a34a37
 +userled on
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig
 new file mode 100644
-index 0000000000..f2a6706c6c
+index 0000000000..c95b89ac31
 --- /dev/null
 +++ b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/esp-hosted/defconfig
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,374 @@
 +#
 +# This file is autogenerated: PLEASE DO NOT EDIT IT.
 +#
@@ -12326,6 +11695,11 @@ index 0000000000..f2a6706c6c
 +CONFIG_ARCH_RAMVECTORS=y
 +CONFIG_ARCH_SETJMP_H=y
 +CONFIG_ARCH_STACKDUMP=y
++# CONFIG_STACK_USAGE is not set
++CONFIG_STACK_USAGE_WARNING=0
++CONFIG_ARCH_TOOLCHAIN_GCC=y
++CONFIG_ARCH_TOOLCHAIN_GNU=y
++CONFIG_ARM_TOOLCHAIN_GNU_EABI=y
 +CONFIG_ARP_SEND_DELAYMSEC=100
 +CONFIG_ARP_SEND_MAXTRIES=10
 +CONFIG_AUDIO=y
@@ -12375,6 +11749,9 @@ index 0000000000..f2a6706c6c
 +CONFIG_EXAMPLES_TOUCHSCREEN_MOUSE=y
 +CONFIG_EXAMPLES_WEBSERVER=y
 +CONFIG_EXAMPLES_WGET=y
++CONFIG_EXAMPLES_WGET_IPADDR=0x0a000002
++CONFIG_EXAMPLES_WGET_DRIPADDR=0x0a000001
++CONFIG_EXAMPLES_WGET_NETMASK=0xffffff00
 +CONFIG_EXAMPLES_WS2812=y
 +CONFIG_EXAMPLES_XBC_TEST=y
 +CONFIG_FB_UPDATE=y
@@ -12418,6 +11795,10 @@ index 0000000000..f2a6706c6c
 +CONFIG_LINE_MAX=1024
 +CONFIG_LV_COLOR_DEPTH_16=y
 +CONFIG_LV_DPI_DEF=128
++CONFIG_LVGL_VERSION_MAJOR=9
++CONFIG_LVGL_VERSION_MINOR=2
++CONFIG_LVGL_VERSION_PATCH=2
++CONFIG_LV_CONF_SKIP=y
 +CONFIG_LV_USE_CLIB_MALLOC=y
 +CONFIG_LV_USE_CLIB_SPRINTF=y
 +CONFIG_LV_USE_CLIB_STRING=y
@@ -12434,16 +11815,19 @@ index 0000000000..f2a6706c6c
 +CONFIG_NETDB_DNSCLIENT=y
 +CONFIG_NETDEV_LATEINIT=y
 +CONFIG_NET_ICMP_SOCKET=y
++CONFIG_NET_IPv4=y
 +CONFIG_NETUTILS_DHCPC=y
 +CONFIG_NETUTILS_FTPD=y
 +CONFIG_NETUTILS_CJSON=y
 +# CONFIG_NETUTILS_HTTPD_SINGLECONNECT is not set
++CONFIG_NETUTILS_HTTPD_CLASSIC=y
 +CONFIG_NETUTILS_HTTPD_CGIPATH=y
 +CONFIG_NETUTILS_HTTPD_POST=y
 +CONFIG_NETUTILS_HTTPD_MAX_BODY=16384
 +CONFIG_NETUTILS_HTTPD_TIMEOUT=3
 +CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE=y
 +CONFIG_NETUTILS_MQTTC=y
++CONFIG_NETUTILS_MQTTC_VERSION="1.1.5"
 +CONFIG_NETUTILS_NTPCLIENT=y
 +CONFIG_NETUTILS_TELNETD=y
 +CONFIG_NETUTILS_WEBCLIENT=y
@@ -12526,6 +11910,8 @@ index 0000000000..f2a6706c6c
 +CONFIG_MMCSD_SPICLOCK=4000000
 +CONFIG_MMCSD_SPIRETRY_COUNT=3
 +CONFIG_SCHED_BACKTRACE=y
++CONFIG_SCHED_WORKQUEUE=y
++CONFIG_SCHED_LPWORK=y
 +CONFIG_SCHED_LPWORKPRIORITY=80
 +CONFIG_SERIAL_TERMIOS=y
 +CONFIG_SIG_DEFAULT=y
@@ -12574,6 +11960,7 @@ index 0000000000..f2a6706c6c
 +CONFIG_FRUITCLAW_DEEPSEEK_HTTP_TIMEOUT_SEC=15
 +CONFIG_FRUITCLAW_DEEPSEEK_API_KEY_PATH="/mnt/sd0/fruitclaw/secrets/deepseek_api_key"
 +CONFIG_FRUITCLAW_HTTP_ALLOWLIST_PATH="/mnt/sd0/fruitclaw/http_allowlist.txt"
++CONFIG_FRUITCLAW_BERRY_EXPERIMENTAL_RUNNER=y
 +CONFIG_FRUITCLAW_GUARD_ACQUIRE_TIMEOUT_MS=5000
 +CONFIG_FRUITCLAW_SESSION_GUARD_TIMEOUT_MS=180000
 +CONFIG_FRUITCLAW_SESSION_GUARD_HW_TIMEOUT_MS=12000
@@ -12617,6 +12004,8 @@ index 0000000000..f2a6706c6c
 +CONFIG_USBDEV=y
 +CONFIG_USBDEV_BUSPOWERED=y
 +CONFIG_USBHOST=y
++CONFIG_USBHOST_HAVE_ASYNCH=y
++CONFIG_USBHOST_ASYNCH=y
 +CONFIG_USBHOST_WAITER=y
 +CONFIG_USBHOST_WAITER_PRIO=100
 +CONFIG_USBHOST_WAITER_STACKSIZE=4096
@@ -12637,6 +12026,7 @@ index 0000000000..f2a6706c6c
 +CONFIG_WQUEUE_NOTIFIER=y
 +CONFIG_WATCHDOG=y
 +CONFIG_WS2812=y
++CONFIG_WS2812_FREQUENCY=4000000
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/hstxdvi/README.md b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/hstxdvi/README.md
 new file mode 100644
 index 0000000000..a3a9f5dcfd
@@ -14354,10 +13744,10 @@ index 0000000000..7a447397d1
 +rtttl -r 22050 -v 95 "testtone:d=1,o=4,b=120:a,a,a,a"
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/include/board.h b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/include/board.h
 new file mode 100644
-index 0000000000..fe39ddc771
+index 0000000000..0d40f7db7e
 --- /dev/null
 +++ b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/include/board.h
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,249 @@
 +/****************************************************************************
 + * boards/arm/rp23xx/adafruit-fruit-jam-rp2350/include/board.h
 + *
@@ -14581,7 +13971,6 @@ index 0000000000..fe39ddc771
 +
 +#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
 +int board_fruitjam_esp_hosted_start(void);
-+int board_fruitjam_shared_reset_recover(void);
 +#endif
 +
 +/****************************************************************************
@@ -16174,10 +15563,10 @@ index 0000000000..d4803488b4
 +#include <nuttx/config.h>
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/etc/init.d/rcS b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/etc/init.d/rcS
 new file mode 100644
-index 0000000000..d19d9d77db
+index 0000000000..34af981192
 --- /dev/null
 +++ b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/etc/init.d/rcS
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,54 @@
 +/****************************************************************************
 + * boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/etc/init.d/rcS
 + *
@@ -16202,6 +15591,10 @@ index 0000000000..d19d9d77db
 +
 +#include <nuttx/config.h>
 +
++#ifdef CONFIG_FRUITCLAW_BOOT_AUTOSTART
++fruitclaw boot &
++#endif
++
 +#if defined(CONFIG_RP23XX_HSTX_DVI_BOOT_AUTOSTART) && \
 +    defined(CONFIG_SYSTEM_DVICTRL)
 +#  ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
@@ -16209,15 +15602,6 @@ index 0000000000..d19d9d77db
 +#  else
 +dvictrl start --unguarded
 +#  endif
-+dvictrl pattern colorbars
-+#endif
-+
-+#ifdef CONFIG_SYSTEM_SDMOUNT
-+sdmount
-+#endif
-+
-+#ifdef CONFIG_FRUITCLAW_BOOT_AUTOSTART
-+fruitclaw boot &
 +#endif
 +
 +#ifdef CONFIG_SYSTEM_TRMNL_BOOT_AUTOSTART
@@ -16824,10 +16208,10 @@ index 0000000000..6bc7346c7e
 +#endif
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_bringup.c b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_bringup.c
 new file mode 100644
-index 0000000000..b5f7f91249
+index 0000000000..43fd7a6d4d
 --- /dev/null
 +++ b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_bringup.c
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,381 @@
 +/****************************************************************************
 + * boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_bringup.c
 + *
@@ -16856,13 +16240,10 @@ index 0000000000..b5f7f91249
 +
 +#include <debug.h>
 +#include <errno.h>
-+#include <fcntl.h>
 +#include <stdbool.h>
 +#include <stddef.h>
 +#include <string.h>
-+#include <sys/param.h>
 +#include <sys/stat.h>
-+#include <unistd.h>
 +
 +#include <nuttx/clock.h>
 +#include <nuttx/fs/fs.h>
@@ -16903,7 +16284,6 @@ index 0000000000..b5f7f91249
 +
 +#ifdef CONFIG_RP23XX_I2S
 +int fruitjam_audio_codec_initialize(void);
-+int fruitjam_audio_codec_reinitialize(void);
 +#endif
 +
 +/****************************************************************************
@@ -16921,10 +16301,6 @@ index 0000000000..b5f7f91249
 +static mutex_t g_fruitjam_esp_hosted_lock = NXMUTEX_INITIALIZER;
 +#endif
 +
-+#ifdef CONFIG_RP23XX_I2S
-+static bool g_fruitjam_audio_shared_reset_dirty;
-+#endif
-+
 +/****************************************************************************
 + * Private Functions
 + ****************************************************************************/
@@ -16934,45 +16310,9 @@ index 0000000000..b5f7f91249
 + ****************************************************************************/
 +
 +#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
-+static int fruitjam_audio_shared_reset_recover(bool force)
-+{
-+#ifdef CONFIG_RP23XX_I2S
-+  int ret;
-+
-+  if (!force && !g_fruitjam_audio_shared_reset_dirty)
-+    {
-+      return OK;
-+    }
-+
-+  ret = fruitjam_audio_codec_reinitialize();
-+  if (ret < 0)
-+    {
-+      syslog(LOG_WARNING,
-+             "WARNING: failed to reinitialize Fruit Jam audio codec "
-+             "after shared NINA reset: %d\n", ret);
-+      return ret;
-+    }
-+
-+  g_fruitjam_audio_shared_reset_dirty = false;
-+#endif
-+
-+  return OK;
-+}
-+
 +static int fruitjam_esp_hosted_reset(FAR void *arg, bool asserted)
 +{
 +  UNUSED(arg);
-+
-+  /* The ESP32-C6 and TLV320DAC3100 share this reset line on Fruit Jam.
-+   * Any ESP-hosted reset invalidates the audio codec register state too.
-+   */
-+
-+#ifdef CONFIG_RP23XX_I2S
-+  if (asserted)
-+    {
-+      g_fruitjam_audio_shared_reset_dirty = true;
-+    }
-+#endif
 +
 +  /* ESP32-C6 reset is active-low on the Fruit Jam NINA wiring. */
 +
@@ -17054,38 +16394,6 @@ index 0000000000..b5f7f91249
 +  return esp_hosted_spi_initialize(&config);
 +}
 +
-+static int fruitjam_esp_hosted_wait_ready(void)
-+{
-+#ifdef CONFIG_ESP_HOSTED_WLAN
-+  struct esp_hosted_stats_s stats;
-+  uint32_t waited_ms = 0;
-+
-+  while (waited_ms <=
-+         CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_READY_TIMEOUT_MS)
-+    {
-+      if (esp_hosted_spi_get_stats(&stats) == 0 &&
-+          stats.wlan_register_count > 0)
-+        {
-+          return OK;
-+        }
-+
-+      if (CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_READY_TIMEOUT_MS == 0)
-+        {
-+          break;
-+        }
-+
-+      usleep(100 * USEC_PER_MSEC);
-+      waited_ms += 100;
-+    }
-+
-+  syslog(LOG_WARNING,
-+         "WARNING: ESP-Hosted wlan0 registration timed out\n");
-+  return -ETIMEDOUT;
-+#else
-+  return OK;
-+#endif
-+}
-+
 +#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 +static void fruitjam_esp_hosted_worker(FAR void *arg)
 +{
@@ -17106,7 +16414,6 @@ index 0000000000..b5f7f91249
 +#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
 +int board_fruitjam_esp_hosted_start(void)
 +{
-+  int audio_ret;
 +  int ret;
 +
 +  ret = nxmutex_lock(&g_fruitjam_esp_hosted_lock);
@@ -17117,73 +16424,18 @@ index 0000000000..b5f7f91249
 +
 +  if (g_fruitjam_esp_hosted_started)
 +    {
-+      ret = fruitjam_esp_hosted_wait_ready();
-+      audio_ret = fruitjam_audio_shared_reset_recover(false);
-+      if (ret >= 0 && audio_ret < 0)
-+        {
-+          ret = audio_ret;
-+        }
-+
 +      nxmutex_unlock(&g_fruitjam_esp_hosted_lock);
-+      return ret;
++      return OK;
 +    }
 +
 +  ret = fruitjam_esp_hosted_initialize();
 +  if (ret >= 0)
 +    {
 +      g_fruitjam_esp_hosted_started = true;
-+      ret = fruitjam_esp_hosted_wait_ready();
-+
-+      audio_ret = fruitjam_audio_shared_reset_recover(true);
-+      if (ret >= 0 && audio_ret < 0)
-+        {
-+          ret = audio_ret;
-+        }
-+    }
-+  else
-+    {
-+      (void)fruitjam_audio_shared_reset_recover(false);
 +    }
 +
 +  nxmutex_unlock(&g_fruitjam_esp_hosted_lock);
 +  return ret;
-+}
-+
-+int board_fruitjam_shared_reset_recover(void)
-+{
-+  int audio_ret;
-+  int ret;
-+
-+  ret = nxmutex_lock(&g_fruitjam_esp_hosted_lock);
-+  if (ret < 0)
-+    {
-+      return ret;
-+    }
-+
-+  if (!g_fruitjam_esp_hosted_started)
-+    {
-+      ret = fruitjam_esp_hosted_initialize();
-+      if (ret >= 0)
-+        {
-+          g_fruitjam_esp_hosted_started = true;
-+        }
-+    }
-+
-+  if (g_fruitjam_esp_hosted_started)
-+    {
-+      ret = fruitjam_esp_hosted_wait_ready();
-+      if (ret < 0)
-+        {
-+          syslog(LOG_WARNING,
-+                 "WARNING: ESP-Hosted not ready during shared reset "
-+                 "recovery: %d\n", ret);
-+        }
-+    }
-+
-+  audio_ret = fruitjam_audio_shared_reset_recover(true);
-+  nxmutex_unlock(&g_fruitjam_esp_hosted_lock);
-+
-+  return audio_ret;
 +}
 +#endif
 +
@@ -17208,89 +16460,6 @@ index 0000000000..b5f7f91249
 +    {
 +      syslog(LOG_WARNING, "WARNING: nx_mount(tmpfs,%s) failed: %d\n",
 +             path, ret);
-+    }
-+}
-+#endif
-+
-+/****************************************************************************
-+ * Name: rp23xx_write_text_file
-+ ****************************************************************************/
-+
-+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_TMPFS
-+static int rp23xx_write_text_file(FAR const char *path,
-+                                  FAR const char *text)
-+{
-+  FAR const char *cursor = text;
-+  size_t remaining = strlen(text);
-+  int fd;
-+  int ret = OK;
-+
-+  fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-+  if (fd < 0)
-+    {
-+      return -errno;
-+    }
-+
-+  while (remaining > 0)
-+    {
-+      ssize_t nwritten = write(fd, cursor, remaining);
-+      if (nwritten < 0)
-+        {
-+          ret = -errno;
-+          break;
-+        }
-+
-+      cursor += nwritten;
-+      remaining -= nwritten;
-+    }
-+
-+  close(fd);
-+  return ret;
-+}
-+
-+/****************************************************************************
-+ * Name: rp23xx_populate_examples_tmpfs
-+ ****************************************************************************/
-+
-+static void rp23xx_populate_examples_tmpfs(void)
-+{
-+  static const struct
-+  {
-+    FAR const char *path;
-+    FAR const char *text;
-+  } files[] =
-+    {
-+      {
-+        "/examples/README.txt",
-+        "Fruit Jam NuttX examples\n"
-+        "========================\n"
-+        "\n"
-+        "Tiny volatile help directory for FruitClaw alpha.\n"
-+        "Use direct commands for smoke tests:\n"
-+        "  neopixels blue 64\n"
-+        "  neopixels off\n"
-+        "  rtttl -r 22050 -v 95 \"testtone:d=1,o=4,b=120:a,a,a,a\"\n"
-+        "  dvictrl start\n"
-+        "Use SD for editable scripts: /mnt/sd0/fruitclaw/scripts\n"
-+      },
-+      {
-+        "/examples/examples_help.sh",
-+        "cat /examples/README.txt\n"
-+      },
-+    };
-+  size_t i;
-+  int ret;
-+
-+  rp23xx_mount_tmpfs("/examples");
-+
-+  for (i = 0; i < nitems(files); i++)
-+    {
-+      ret = rp23xx_write_text_file(files[i].path, files[i].text);
-+      if (ret < 0)
-+        {
-+          syslog(LOG_WARNING, "WARNING: failed to write %s: %d\n",
-+                 files[i].path, ret);
-+        }
 +    }
 +}
 +#endif
@@ -17369,10 +16538,6 @@ index 0000000000..b5f7f91249
 +  rp23xx_mount_tmpfs("/tmp");
 +  rp23xx_mount_tmpfs("/scripts");
 +  rp23xx_mount_tmpfs("/data");
-+#endif
-+
-+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_TMPFS
-+  rp23xx_populate_examples_tmpfs();
 +#endif
 +
 +#ifdef CONFIG_USERLED
@@ -18062,10 +17227,10 @@ index 0000000000..267b438e97
 +const unsigned int rp23xx_romfs_img_len = 5120;
 diff --git a/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_fruitjam_audio.c b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_fruitjam_audio.c
 new file mode 100644
-index 0000000000..c8a740efea
+index 0000000000..c665159aa6
 --- /dev/null
 +++ b/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_fruitjam_audio.c
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,235 @@
 +/****************************************************************************
 + * boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/rp23xx_fruitjam_audio.c
 + *
@@ -18297,17 +17462,6 @@ index 0000000000..c8a740efea
 +
 +int fruitjam_audio_codec_initialize(void)
 +{
-+  return board_i2sdev_codec_initialize(0);
-+}
-+
-+int fruitjam_audio_codec_reinitialize(void)
-+{
-+  /* The Fruit Jam ESP32-C6 and TLV320DAC3100 share the NINA reset line.
-+   * ESP-Hosted bring-up can therefore reset the DAC after audio was first
-+   * registered, so force the codec register script to run again.
-+   */
-+
-+  g_codec_initialized = false;
 +  return board_i2sdev_codec_initialize(0);
 +}
 +
@@ -23413,10 +22567,10 @@ index e6456364a4..d6f5939ceb 100644
  endif
 diff --git a/drivers/wireless/esp_hosted.c b/drivers/wireless/esp_hosted.c
 new file mode 100644
-index 0000000000..59eb9db4f4
+index 0000000000..763a8cc155
 --- /dev/null
 +++ b/drivers/wireless/esp_hosted.c
-@@ -0,0 +1,3461 @@
+@@ -0,0 +1,3373 @@
 +/****************************************************************************
 + * drivers/wireless/esp_hosted.c
 + *
@@ -23456,7 +22610,6 @@ index 0000000000..59eb9db4f4
 +#include <net/if_arp.h>
 +
 +#include <nuttx/arch.h>
-+#include <nuttx/clock.h>
 +#include <nuttx/debug.h>
 +#include <nuttx/mm/iob.h>
 +#include <nuttx/mutex.h>
@@ -23475,12 +22628,6 @@ index 0000000000..59eb9db4f4
 +#define ESP_HOSTED_HANDSHAKE_POLL_US     1000
 +#define ESP_HOSTED_HANDSHAKE_POLLS       100
 +#define ESP_HOSTED_RX_WORK_DRAIN_LIMIT   8
-+#define ESP_HOSTED_STARTUP_RETRY_MS      250
-+#define ESP_HOSTED_STARTUP_RETRIES       24
-+#define ESP_HOSTED_CONTROL_RETRY_MS      500
-+#define ESP_HOSTED_CONTROL_RETRIES       16
-+#define ESP_HOSTED_MAC_RETRY_MS          500
-+#define ESP_HOSTED_MAC_RETRIES           16
 +
 +#define ESP_HOSTED_HEADER_LEN            \
 +  (sizeof(struct esp_hosted_payload_header_s))
@@ -23606,18 +22753,15 @@ index 0000000000..59eb9db4f4
 +  bool init_seen;
 +  bool startup_probe_pending;
 +  bool startup_probe_sent;
-+  uint8_t startup_probe_retries;
 +  bool have_mac;
 +  bool have_fwversion;
 +#ifdef CONFIG_ESP_HOSTED_WLAN
 +  bool mac_probe_sent;
-+  uint8_t mac_probe_retries;
 +  bool wlan_registered;
 +  bool ifup;
 +  bool carrier_on;
 +  bool wlan_control_start_pending;
 +  bool wlan_control_started;
-+  uint8_t wlan_control_start_retries;
 +  bool have_ssid;
 +  bool scan_in_progress;
 +  bool scan_done;
@@ -23657,8 +22801,6 @@ index 0000000000..59eb9db4f4
 + ****************************************************************************/
 +
 +static void esp_hosted_rx_work(FAR void *arg);
-+static void esp_hosted_schedule_rx_work_delay(
-+  FAR struct esp_hosted_driver_s *priv, clock_t delay);
 +static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
 +                                       uint32_t request_id);
 +
@@ -24652,9 +23794,6 @@ index 0000000000..59eb9db4f4
 +
 +  memcpy(priv->mac, mac, sizeof(priv->mac));
 +  priv->have_mac = true;
-+#ifdef CONFIG_ESP_HOSTED_WLAN
-+  priv->mac_probe_retries = 0;
-+#endif
 +  priv->stats.rpc_mac_count++;
 +
 +  ninfo("ESP-Hosted STA MAC: %02x:%02x:%02x:%02x:%02x:%02x resp=%" PRId32
@@ -24818,7 +23957,6 @@ index 0000000000..59eb9db4f4
 +
 +  priv->fwversion = version;
 +  priv->have_fwversion = true;
-+  priv->startup_probe_retries = 0;
 +  priv->stats.rpc_fwversion_count++;
 +
 +  ninfo("ESP-Hosted firmware: %" PRIu32 ".%" PRIu32 ".%" PRIu32
@@ -25360,7 +24498,6 @@ index 0000000000..59eb9db4f4
 +  if (ret < 0)
 +    {
 +      priv->stats.rpc_malformed_count++;
-+      priv->stats.rpc_last_malformed_ret = ret;
 +      return ret;
 +    }
 +
@@ -25368,14 +24505,9 @@ index 0000000000..59eb9db4f4
 +  if (ret < 0)
 +    {
 +      priv->stats.rpc_malformed_count++;
-+      priv->stats.rpc_last_malformed_ret = ret;
 +      return ret;
 +    }
 +
-+  priv->stats.rpc_last_msg_type = msg.msg_type;
-+  priv->stats.rpc_last_msg_id = msg.msg_id;
-+  priv->stats.rpc_last_payload_field = msg.payload_field;
-+  priv->stats.rpc_last_payload_len = msg.payload_len;
 +  priv->stats.rpc_last_uid = msg.uid;
 +
 +  if (msg.msg_type == ESP_HOSTED_RPC_TYPE_RESP)
@@ -25386,7 +24518,6 @@ index 0000000000..59eb9db4f4
 +      if (msg.payload_field != msg.msg_id)
 +        {
 +          priv->stats.rpc_malformed_count++;
-+          priv->stats.rpc_last_malformed_ret = -EINVAL;
 +          nwarn("ESP-Hosted RPC response payload mismatch: id=%" PRIu32
 +                " payload=%" PRIu32 "\n",
 +                msg.msg_id, msg.payload_field);
@@ -25423,7 +24554,6 @@ index 0000000000..59eb9db4f4
 +            if (resp != 0)
 +              {
 +                priv->stats.rpc_malformed_count++;
-+                priv->stats.rpc_last_malformed_ret = -EIO;
 +                nwarn("ESP-Hosted RPC response failed: id=%" PRIu32
 +                      " resp=%" PRId32 "\n",
 +                      msg.msg_id, resp);
@@ -25453,7 +24583,6 @@ index 0000000000..59eb9db4f4
 +  else if (msg.msg_type == ESP_HOSTED_RPC_TYPE_EVENT)
 +    {
 +      priv->stats.rpc_event_count++;
-+      priv->stats.rpc_last_event_id = msg.msg_id;
 +
 +      switch (msg.msg_id)
 +        {
@@ -25480,7 +24609,6 @@ index 0000000000..59eb9db4f4
 +    }
 +
 +  priv->stats.rpc_malformed_count++;
-+  priv->stats.rpc_last_malformed_ret = -EINVAL;
 +  nwarn("ESP-Hosted unexpected RPC message: type=%" PRIu32 " id=%" PRIu32
 +        " uid=%" PRIu32 "\n",
 +        msg.msg_type, msg.msg_id, msg.uid);
@@ -25825,25 +24953,19 @@ index 0000000000..59eb9db4f4
 +  return OK;
 +}
 +
-+static void esp_hosted_schedule_rx_work_delay(
-+  FAR struct esp_hosted_driver_s *priv, clock_t delay)
++static void esp_hosted_schedule_rx_work(FAR struct esp_hosted_driver_s *priv)
 +{
 +  int ret;
 +
 +  if (work_available(&priv->rx_work))
 +    {
 +      ret = work_queue(ESP_HOSTED_WORK_QUEUE, &priv->rx_work,
-+                       esp_hosted_rx_work, priv, delay);
++                       esp_hosted_rx_work, priv, 0);
 +      if (ret >= 0)
 +        {
 +          priv->stats.rx_work_count++;
 +        }
 +    }
-+}
-+
-+static void esp_hosted_schedule_rx_work(FAR struct esp_hosted_driver_s *priv)
-+{
-+  esp_hosted_schedule_rx_work_delay(priv, 0);
 +}
 +
 +static int esp_hosted_dataready_isr(int irq, FAR void *context, FAR void *arg)
@@ -26532,21 +25654,12 @@ index 0000000000..59eb9db4f4
 +      return -EAGAIN;
 +    }
 +
-+  if (priv->wlan_control_start_retries >= ESP_HOSTED_CONTROL_RETRIES)
-+    {
-+      return -ETIMEDOUT;
-+    }
-+
 +  priv->wlan_control_start_pending = false;
-+  priv->wlan_control_start_retries++;
 +
 +  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_INIT);
 +  if (ret < 0)
 +    {
 +      priv->stats.wlan_control_start_error_count++;
-+      priv->wlan_control_start_pending = true;
-+      esp_hosted_schedule_rx_work_delay(priv,
-+        MSEC2TICK(ESP_HOSTED_CONTROL_RETRY_MS));
 +      return ret;
 +    }
 +
@@ -26554,9 +25667,6 @@ index 0000000000..59eb9db4f4
 +  if (ret < 0)
 +    {
 +      priv->stats.wlan_control_start_error_count++;
-+      priv->wlan_control_start_pending = true;
-+      esp_hosted_schedule_rx_work_delay(priv,
-+        MSEC2TICK(ESP_HOSTED_CONTROL_RETRY_MS));
 +      return ret;
 +    }
 +
@@ -26564,14 +25674,10 @@ index 0000000000..59eb9db4f4
 +  if (ret < 0)
 +    {
 +      priv->stats.wlan_control_start_error_count++;
-+      priv->wlan_control_start_pending = true;
-+      esp_hosted_schedule_rx_work_delay(priv,
-+        MSEC2TICK(ESP_HOSTED_CONTROL_RETRY_MS));
 +      return ret;
 +    }
 +
 +  priv->wlan_control_started = true;
-+  priv->wlan_control_start_retries = 0;
 +  priv->stats.wlan_control_start_count++;
 +
 +  ninfo("ESP-Hosted STA control path start requested\n");
@@ -26583,43 +25689,19 @@ index 0000000000..59eb9db4f4
 +{
 +  int ret;
 +
-+  if (!priv->startup_probe_pending || priv->have_fwversion)
++  if (!priv->startup_probe_pending || priv->startup_probe_sent)
 +    {
 +      return;
 +    }
 +
-+  if (priv->startup_probe_sent)
-+    {
-+      if (priv->startup_probe_retries >= ESP_HOSTED_STARTUP_RETRIES)
-+        {
-+          return;
-+        }
-+
-+      priv->startup_probe_sent = false;
-+    }
-+
 +  priv->startup_probe_pending = false;
 +  priv->startup_probe_sent = true;
-+  priv->startup_probe_retries++;
 +
 +  ret = esp_hosted_send_rpc_request(priv,
 +                                    ESP_HOSTED_RPC_GET_COPROCESSOR_FWVERSION);
 +  if (ret < 0)
 +    {
 +      nwarn("ESP-Hosted firmware-version RPC failed: %d\n", ret);
-+      priv->startup_probe_sent = false;
-+    }
-+
-+  if (!priv->have_fwversion &&
-+      priv->startup_probe_retries < ESP_HOSTED_STARTUP_RETRIES)
-+    {
-+      priv->startup_probe_pending = true;
-+      esp_hosted_schedule_rx_work_delay(priv,
-+        MSEC2TICK(ESP_HOSTED_STARTUP_RETRY_MS));
-+    }
-+  else if (!priv->have_fwversion)
-+    {
-+      nwarn("ESP-Hosted firmware-version RPC exhausted retries\n");
 +    }
 +}
 +
@@ -26699,31 +25781,15 @@ index 0000000000..59eb9db4f4
 +  if (priv->wlan_control_started && !priv->have_mac &&
 +      !priv->mac_probe_sent)
 +    {
-+      if (priv->mac_probe_retries >= ESP_HOSTED_MAC_RETRIES)
-+        {
-+          nwarn("ESP-Hosted MAC RPC exhausted retries\n");
-+          goto out_drain;
-+        }
-+
 +      priv->mac_probe_sent = true;
-+      priv->mac_probe_retries++;
 +      ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_GET_MAC_ADDRESS);
 +      if (ret < 0)
 +        {
 +          priv->mac_probe_sent = false;
 +          nwarn("ESP-Hosted MAC RPC failed: %d\n", ret);
-+          esp_hosted_schedule_rx_work_delay(priv,
-+            MSEC2TICK(ESP_HOSTED_MAC_RETRY_MS));
-+        }
-+      else if (!priv->have_mac)
-+        {
-+          priv->mac_probe_sent = false;
-+          esp_hosted_schedule_rx_work_delay(priv,
-+            MSEC2TICK(ESP_HOSTED_MAC_RETRY_MS));
 +        }
 +    }
 +
-+out_drain:
 +  esp_hosted_drain_rx(priv);
 +#endif
 +}
@@ -27164,10 +26230,10 @@ index 69f7aacd8b..d488727813 100644
  #ifdef CONFIG_USBHOST_MSC
 diff --git a/include/nuttx/wireless/esp_hosted.h b/include/nuttx/wireless/esp_hosted.h
 new file mode 100644
-index 0000000000..69c4dc77a5
+index 0000000000..27bc902528
 --- /dev/null
 +++ b/include/nuttx/wireless/esp_hosted.h
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,224 @@
 +/****************************************************************************
 + * include/nuttx/wireless/esp_hosted.h
 + *
@@ -27340,15 +26406,9 @@ index 0000000000..69c4dc77a5
 +  uint32_t rpc_malformed_count;
 +  uint32_t rpc_fwversion_count;
 +  uint32_t rpc_mac_count;
-+  uint32_t rpc_last_msg_type;
-+  uint32_t rpc_last_msg_id;
-+  uint32_t rpc_last_payload_field;
-+  uint32_t rpc_last_payload_len;
 +  uint32_t rpc_last_request_id;
 +  uint32_t rpc_last_response_id;
-+  uint32_t rpc_last_event_id;
 +  uint32_t rpc_last_uid;
-+  int32_t  rpc_last_malformed_ret;
 +  uint32_t wlan_register_count;
 +  uint32_t wlan_register_error_count;
 +  uint32_t wlan_control_start_count;
