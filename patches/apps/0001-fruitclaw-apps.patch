@@ -82816,10 +82816,10 @@ index 000000000..24bffa958
 +}
 diff --git a/system/fruitclaw/core/fc_selftest.c b/system/fruitclaw/core/fc_selftest.c
 new file mode 100644
-index 000000000..5ee54c6bb
+index 000000000..5d362bee7
 --- /dev/null
 +++ b/system/fruitclaw/core/fc_selftest.c
-@@ -0,0 +1,850 @@
+@@ -0,0 +1,961 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -82868,6 +82868,26 @@ index 000000000..5ee54c6bb
 +
 +  printf("PASS: %s\n", name);
 +  fflush(stdout);
++  return 0;
++}
++
++static int restore_disabled_marker(const char *path, bool existed)
++{
++  if (path == NULL || path[0] == '\0')
++    {
++      return 0;
++    }
++
++  if (existed)
++    {
++      return fc_write_text_file_atomic(path, "disabled\n");
++    }
++
++  if (unlink(path) < 0 && errno != ENOENT)
++    {
++      return -errno;
++    }
++
 +  return 0;
 +}
 +
@@ -83020,6 +83040,97 @@ index 000000000..5ee54c6bb
 +  ret |= check(fc_cap_execute_ctx(&tool_ctx, "self.owner_fake", "{}",
 +                                  buf, sizeof(buf)) == 0,
 +               "owner policy allow");
++
++  buf[0] = '\0';
++  ret |= check(fc_service_control("all", "status", buf, sizeof(buf)) == 0 &&
++               strstr(buf, "\"telnetd\"") != NULL &&
++               strstr(buf, "\"ftpd\"") != NULL,
++               "service status all");
++  buf[0] = '\0';
++  ret |= check(fc_service_control("not-a-service", "status",
++                                  buf, sizeof(buf)) < 0 &&
++               strstr(buf, "unknown service") != NULL,
++               "service status unknown");
++  buf[0] = '\0';
++  ret |= check(fc_service_control("all", "restart", buf, sizeof(buf)) < 0 &&
++               strstr(buf, "service required") != NULL,
++               "service all action rejected");
++  buf[0] = '\0';
++  ret |= check(fc_cap_execute_ctx(&tool_ctx, "service.control",
++                                  "{\"service\":\"telnetd\"}",
++                                  buf, sizeof(buf)) < 0 &&
++               strstr(buf, "missing service or action") != NULL,
++               "service control missing action");
++
++#ifdef CONFIG_SYSTEM_TELNETD
++  {
++    bool marker_existed = false;
++    bool marker_ok;
++
++    marker_ok = fc_data_path("services/telnetd.disabled",
++                             path, sizeof(path)) == 0;
++    if (marker_ok)
++      {
++        marker_existed = access(path, F_OK) == 0;
++      }
++
++    buf[0] = '\0';
++    ret |= check(fc_service_control("telnetd", "status",
++                                    buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"service\":\"telnetd\"") != NULL,
++                 "service status telnetd");
++    buf[0] = '\0';
++    ret |= check(fc_service_control("telnetd", "disable",
++                                    buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"enabled\":false") != NULL &&
++                 (!marker_ok || access(path, F_OK) == 0),
++                 "service disable telnetd marker");
++    buf[0] = '\0';
++    ret |= check(fc_service_control("telnetd", "enable",
++                                    buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"enabled\":true") != NULL &&
++                 (!marker_ok || access(path, F_OK) < 0),
++                 "service enable telnetd marker");
++    ret |= check(restore_disabled_marker(marker_ok ? path : "",
++                                         marker_existed) == 0,
++                 "service restore telnetd marker");
++  }
++#endif
++
++#if defined(CONFIG_EXAMPLES_FTPD) && defined(CONFIG_NETUTILS_FTPD)
++  {
++    bool marker_existed = false;
++    bool marker_ok;
++
++    marker_ok = fc_data_path("services/ftpd.disabled",
++                             path, sizeof(path)) == 0;
++    if (marker_ok)
++      {
++        marker_existed = access(path, F_OK) == 0;
++      }
++
++    buf[0] = '\0';
++    ret |= check(fc_service_control("ftpd", "status",
++                                    buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"service\":\"ftpd\"") != NULL,
++                 "service status ftpd");
++    buf[0] = '\0';
++    ret |= check(fc_service_control("ftpd", "disable",
++                                    buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"enabled\":false") != NULL &&
++                 (!marker_ok || access(path, F_OK) == 0),
++                 "service disable ftpd marker");
++    buf[0] = '\0';
++    ret |= check(fc_service_control("ftpd", "enable",
++                                    buf, sizeof(buf)) == 0 &&
++                 strstr(buf, "\"enabled\":true") != NULL &&
++                 (!marker_ok || access(path, F_OK) < 0),
++                 "service enable ftpd marker");
++    ret |= check(restore_disabled_marker(marker_ok ? path : "",
++                                         marker_existed) == 0,
++                 "service restore ftpd marker");
++  }
++#endif
 +
 +#ifdef CONFIG_FRUITCLAW_MCP_SERVER
 +  fc_mcp_clear_status();
@@ -83672,10 +83783,10 @@ index 000000000..5ee54c6bb
 +}
 diff --git a/system/fruitclaw/fruitclaw_main.c b/system/fruitclaw/fruitclaw_main.c
 new file mode 100644
-index 000000000..e8c3d3b31
+index 000000000..60075745f
 --- /dev/null
 +++ b/system/fruitclaw/fruitclaw_main.c
-@@ -0,0 +1,4562 @@
+@@ -0,0 +1,4649 @@
 +/* SPDX-License-Identifier: Apache-2.0 */
 +
 +#include "fruitclaw.h"
@@ -86900,6 +87011,70 @@ index 000000000..e8c3d3b31
 +  return 0;
 +}
 +
++static int fc_service_status_id_json(enum fc_service_id_e id,
++                                     char *out, size_t out_len)
++{
++  unsigned long attempts;
++  unsigned long restarts;
++  bool started;
++  bool listening;
++  int last_ret;
++  int probe_ret;
++  int64_t last_ms;
++  int64_t now;
++
++  if (out == NULL || out_len == 0)
++    {
++      return -EINVAL;
++    }
++
++  now = fc_mono_ms();
++
++  pthread_mutex_lock(&g_services_lock);
++  if (id == FC_SERVICE_TELNETD)
++    {
++      attempts = g_telnetd_attempts;
++      restarts = g_telnetd_restarts;
++      started = g_telnetd_started;
++      listening = g_telnetd_listening;
++      last_ret = g_telnetd_last_ret;
++      probe_ret = g_telnetd_probe_ret;
++      last_ms = g_telnetd_last_ms;
++    }
++  else
++    {
++      attempts = g_ftpd_attempts;
++      restarts = g_ftpd_restarts;
++      started = g_ftpd_started;
++      listening = g_ftpd_listening;
++      last_ret = g_ftpd_last_ret;
++      probe_ret = g_ftpd_probe_ret;
++      last_ms = g_ftpd_last_ms;
++    }
++
++  pthread_mutex_unlock(&g_services_lock);
++
++  snprintf(out, out_len,
++           "{\"ok\":true,\"service\":\"%s\",\"compiled\":%s,"
++           "\"boot_default\":%s,\"enabled\":%s,\"autostart\":%s,"
++           "\"started\":%s,\"listening\":%s,\"start_supported\":%s,"
++           "\"stop_supported\":%s,\"attempts\":%lu,\"restarts\":%lu,"
++           "\"last_ret\":%d,\"probe_ret\":%d,\"last_age_ms\":%lld}",
++           fc_service_name(id),
++           fc_service_compiled(id) ? "true" : "false",
++           fc_service_boot_default(id) ? "true" : "false",
++           fc_service_runtime_enabled(id) ? "true" : "false",
++           fc_service_autostart_enabled(id) ? "true" : "false",
++           started ? "true" : "false",
++           listening ? "true" : "false",
++           fc_service_compiled(id) ? "true" : "false",
++           fc_service_stop_supported(id) ? "true" : "false",
++           attempts, restarts, last_ret, probe_ret,
++           last_ms > 0 ? (long long)(now - last_ms) : -1);
++
++  return 0;
++}
++
 +int fc_service_control(const char *service_name, const char *action,
 +                       char *out, size_t out_len)
 +{
@@ -86917,10 +87092,33 @@ index 000000000..e8c3d3b31
 +  service = service_name != NULL ? service_name : "all";
 +  verb = action != NULL ? action : "status";
 +
-+  if (strcmp(verb, "status") == 0 ||
-+      strcmp(service, "all") == 0 || service[0] == '\0')
++  if (strcmp(verb, "status") == 0)
 +    {
-+      return fc_services_status_json(out, out_len);
++      if (strcmp(service, "all") == 0 || service[0] == '\0')
++        {
++          return fc_services_status_json(out, out_len);
++        }
++
++      ret = fc_service_resolve(service, &id);
++      if (ret < 0)
++        {
++          snprintf(out, out_len,
++                   "{\"ok\":false,\"service\":\"%s\",\"action\":\"%s\","
++                   "\"error\":\"unknown service\",\"code\":%d}",
++                   service, verb, ret);
++          return ret;
++        }
++
++      return fc_service_status_id_json(id, out, out_len);
++    }
++
++  if (strcmp(service, "all") == 0 || service[0] == '\0')
++    {
++      snprintf(out, out_len,
++               "{\"ok\":false,\"service\":\"%s\",\"action\":\"%s\","
++               "\"error\":\"service required\",\"code\":%d}",
++               service, verb, -EINVAL);
++      return -EINVAL;
 +    }
 +
 +  ret = fc_service_resolve(service, &id);
