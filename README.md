@@ -30,7 +30,9 @@ dist/                         ignored build and release output
 Builds never configure or patch the checked-out submodules.  Each profile is
 materialized from the exact locked commits into `build/work/<profile>/`, then
 patched, overlaid, configured, and built there.  A normal build therefore
-leaves `git status` clean.
+leaves `git status` clean.  Parallel application compilation is retained, but
+the completed `libapps.a` member order is canonicalized before the firmware
+link so scheduling differences cannot change the UF2 bytes.
 
 ## Release profiles
 

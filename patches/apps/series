@@ -3,3 +3,4 @@
 0003-shell-readline-telnet.patch
 0004-network-service-hardening.patch
 0005-webserver-romfs.patch
+0006-deterministic-libapps-archive.patch
