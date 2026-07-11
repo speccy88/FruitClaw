@@ -44,6 +44,7 @@
   "build": {
     "container_image": "ghcr.io/apache/nuttx/apache-nuttx-ci-linux",
     "container_digest": "sha256:2002136a4042fabfa00f2b1607b5054df69706af3dbb1556c9860cc08f597818",
+    "container_platform": "linux/amd64",
     "toolchain": "Arm GNU Toolchain 14.2.Rel1 (arm-none-eabi-gcc 14.2.1 20241119)",
     "source_date_epoch": 1783388180
   }

@@ -54,6 +54,8 @@ build = lock.get("build", {})
 digest = build.get("container_digest", "")
 if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
     raise SystemExit("sources.lock.json: build container must be pinned by sha256 digest")
+if build.get("container_platform") != "linux/amd64":
+    raise SystemExit("sources.lock.json: build container platform must be linux/amd64")
 dependencies = lock.get("dependencies", {})
 for name in ("berry", "esp_hosted_mcu"):
     sha = dependencies.get(name, {}).get("sha256", "")

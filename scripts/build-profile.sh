@@ -58,6 +58,13 @@ done
 [[ -f $ROOT/sources.lock.json ]] || nr_die "missing sources.lock.json"
 [[ -f $ROOT/profiles/manifest.json ]] || nr_die "missing profiles/manifest.json"
 
+CONTAINER_PLATFORM=
+if ((USE_CONTAINER)); then
+  CONTAINER_PLATFORM=$(nr_json_value "$ROOT/sources.lock.json" build.container_platform)
+  [[ $CONTAINER_PLATFORM =~ ^linux/(amd64|arm64)$ ]] || \
+    nr_die "unsupported locked container platform: ${CONTAINER_PLATFORM}"
+fi
+
 DEFCONFIG_REL=$(nr_profile_field "$ROOT" "$PROFILE" defconfig) || \
   nr_die "profile is not declared in profiles/manifest.json: $PROFILE"
 DEFCONFIG_DEST=$(nr_profile_field "$ROOT" "$PROFILE" defconfig_destination) || \
@@ -186,6 +193,7 @@ if [[ $BOARD == adafruit-fruit-jam-rp2350 && \
     nr_require_tool docker
     ROMFS_CONTAINER=$(nr_container_ref "$ROOT")
     docker run --rm \
+      --platform "$CONTAINER_PLATFORM" \
       --user "$(id -u):$(id -g)" \
       -e HOME=/tmp \
       -e PICO_SDK_PATH="${PICO_SDK_BUILD_PATH:-/work/deps/pico-sdk}" \
@@ -203,6 +211,7 @@ nr_note "installing NuttX board configuration ${BOARD}:${BOARD_CONFIG}"
 if ((USE_CONTAINER)); then
   CONFIGURE_CONTAINER=$(nr_container_ref "$ROOT")
   docker run --rm \
+    --platform "$CONTAINER_PLATFORM" \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
     -e PICO_SDK_PATH="${PICO_SDK_BUILD_PATH:-/work/deps/pico-sdk}" \
@@ -318,8 +327,11 @@ run_container_build() {
   container=$(nr_container_ref "$ROOT")
   nr_note "using pinned build container ${container}"
   docker run --rm \
+    --platform "$CONTAINER_PLATFORM" \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
+    -e CCACHE_DIR=/tmp/ccache \
+    -e CCACHE_TEMPDIR=/tmp/ccache-tmp \
     -e PICO_SDK_PATH="${PICO_SDK_BUILD_PATH:-/work/deps/pico-sdk}" \
     -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -e TZ=UTC \

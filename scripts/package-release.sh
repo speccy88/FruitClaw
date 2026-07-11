@@ -132,13 +132,14 @@ PATCH_APPS_HASH=$(nr_hash_tree "$ROOT/patches/apps")
 OVERLAY_NUTTX_HASH=$(nr_hash_tree "$ROOT/overlays/nuttx")
 OVERLAY_APPS_HASH=$(nr_hash_tree "$ROOT/overlays/apps")
 CONTAINER=$(nr_container_ref "$ROOT")
+CONTAINER_PLATFORM=$(nr_json_value "$ROOT/sources.lock.json" build.container_platform)
 TOOLCHAIN=$(nr_json_value "$ROOT/sources.lock.json" build.toolchain 2>/dev/null || printf 'unknown\n')
 PROFILES_MANIFEST_HASH=$(nr_sha256 "$ROOT/profiles/manifest.json")
 SOURCES_LOCK_HASH=$(nr_sha256 "$ROOT/sources.lock.json")
 
 nr_python - "$ROOT" "$STAGING" "$TAG" "$TAG_COMMIT" "$SOURCE_DATE_EPOCH" \
   "$NUTTX_COMMIT" "$APPS_COMMIT" "$PATCH_NUTTX_HASH" "$PATCH_APPS_HASH" \
-  "$OVERLAY_NUTTX_HASH" "$OVERLAY_APPS_HASH" "$CONTAINER" "$TOOLCHAIN" \
+  "$OVERLAY_NUTTX_HASH" "$OVERLAY_APPS_HASH" "$CONTAINER" "$CONTAINER_PLATFORM" "$TOOLCHAIN" \
   "$PROFILES_MANIFEST_HASH" "$SOURCES_LOCK_HASH" "$MANIFEST_NAME" "$ESP_NAME" \
   "${EXPECTED[@]}" <<'PY'
 import hashlib
@@ -159,6 +160,7 @@ import sys
     overlay_nuttx,
     overlay_apps,
     container,
+    container_platform,
     toolchain,
     profiles_manifest_hash,
     sources_lock_hash,
@@ -209,7 +211,11 @@ document = {
         "patches": {"nuttx": patch_nuttx, "apps": patch_apps},
         "overlays": {"nuttx": overlay_nuttx, "apps": overlay_apps},
     },
-    "build": {"container": container, "toolchain": toolchain},
+    "build": {
+        "container": container,
+        "container_platform": container_platform,
+        "toolchain": toolchain,
+    },
     "dependencies": lock.get("dependencies", {}),
     "artifacts": artifacts,
 }
