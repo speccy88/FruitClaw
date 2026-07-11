@@ -46,13 +46,26 @@ jobs:
         run: |
           set -euo pipefail
           bash -n scripts/*.sh scripts/lib/*.sh
+          sh -n overlays/apps/tools/canonicalize_archive.sh
           python3 -c 'import ast, glob; [ast.parse(open(path, encoding="utf-8").read(), path) for path in glob.glob("scripts/*.py")]'
-          shellcheck -x scripts/*.sh scripts/lib/*.sh
+          shellcheck -x scripts/*.sh scripts/lib/*.sh overlays/apps/tools/canonicalize_archive.sh
 
       - name: Validate locks and profile contracts
         run: |
           scripts/bootstrap.sh --check
           scripts/check-credentials.py
+
+      - name: Test deterministic archive canonicalization
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          ar_tool=$(command -v arm-none-eabi-ar || command -v ar)
+          printf 'z\n' > "$work/z.member"
+          printf 'a\n' > "$work/a.member"
+          "$ar_tool" rcs "$work/test.a" "$work/z.member" "$work/a.member"
+          overlays/apps/tools/canonicalize_archive.sh "$ar_tool" "$work/test.a"
+          [[ $("$ar_tool" t "$work/test.a") == $'a.member\nz.member' ]]
 
       - name: Apply ordered patch stacks to immutable pins
         run: scripts/check-patches.sh

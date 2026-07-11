@@ -98,6 +98,11 @@ grep -R -q '^[[:space:]]*config READLINE_FORCE_ECHO$' "$WORK/apps/system/readlin
 nr_copy_overlay NuttX "$ROOT/overlays/nuttx" "$WORK/nuttx"
 nr_copy_overlay apps "$ROOT/overlays/apps" "$WORK/apps"
 
+grep -F -q "tools\$(DELIM)canonicalize_archive.sh" "$WORK/apps/Makefile" || \
+  nr_die "deterministic libapps archive hook missing after patch application"
+[[ -x $WORK/apps/tools/canonicalize_archive.sh ]] || \
+  nr_die "deterministic libapps archive helper is missing or not executable"
+
 AFTER_STATUS=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)
 [[ $AFTER_STATUS == "$BEFORE_STATUS" ]] || \
   nr_die "patch validation changed the wrapper or submodule worktrees"

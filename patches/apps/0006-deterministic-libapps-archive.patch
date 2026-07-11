@@ -1,0 +1,11 @@
+diff --git a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
+@@ -117,6 +117,7 @@ ifeq ($(CONFIG_WINDOWS_NATIVE),y)
+ $(BIN): $(foreach SDIR, $(CONFIGURED_APPS), $(SDIR)_all)
+ else
+ $(BIN): $(foreach SDIR, $(CONFIGURED_APPS), $(SDIR)_all)
++	$(Q) $(APPDIR)$(DELIM)tools$(DELIM)canonicalize_archive.sh "$(firstword $(AR))" "$(BIN)"
+ 	$(call LINK_WASM)
+ endif
+ 
