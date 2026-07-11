@@ -1,0 +1,65 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_DVICTRL
+	tristate "'dvictrl' command"
+	default n
+	depends on VIDEO_FB
+	---help---
+		Enable a command that controls and tests a framebuffer-backed
+		DVI display.
+
+if SYSTEM_DVICTRL
+
+config SYSTEM_DVICTRL_PROGNAME
+	string "Program name"
+	default "dvictrl"
+
+config SYSTEM_DVICTRL_PRIORITY
+	int "dvictrl task priority"
+	default 100
+
+config SYSTEM_DVICTRL_STACKSIZE
+	int "dvictrl stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_DVICTRL_DEVPATH
+	string "Framebuffer device path"
+	default "/dev/fb0"
+
+config SYSTEM_DVICTRL_START_GUARD
+	bool "Guard DVI start with watchdog"
+	default y
+	depends on WATCHDOG
+	---help---
+		Arm the watchdog boot guard before enabling DVI output.  On the
+		Fruit Jam board this lets a failed DVI start reset into BOOTSEL
+		automatically instead of requiring the BOOTSEL button.
+
+if SYSTEM_DVICTRL_START_GUARD
+
+config SYSTEM_DVICTRL_GUARD_DEVPATH
+	string "Watchdog device path for DVI start guard"
+	default "/dev/watchdog0"
+
+config SYSTEM_DVICTRL_GUARD_TIMEOUT_MS
+	int "DVI start guard timeout in milliseconds"
+	default 8000
+	range 1000 16000
+	---help---
+		The RP23xx watchdog hardware limit is about 16 seconds.  Keep this
+		long enough for the DVI start ioctl and settle window to complete.
+
+config SYSTEM_DVICTRL_GUARD_SETTLE_MS
+	int "DVI start settle window in milliseconds"
+	default 3000
+	range 0 15000
+	---help---
+		After FBIOSET_POWER(1) returns, keep the guard armed for this long
+		so early DMA/HSTX stalls still recover into BOOTSEL.
+
+endif
+
+endif

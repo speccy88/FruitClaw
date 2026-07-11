@@ -1,0 +1,35 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_BOOTSEL
+	tristate "'bootsel' command"
+	default n
+	depends on BOARDCTL_RESET
+	---help---
+		Enable a command that requests board reset into USB bootloader mode.
+		On RP23xx boards in this checkout, reset status 3 enters BOOTSEL.
+
+if SYSTEM_BOOTSEL
+
+config SYSTEM_BOOTSEL_PROGNAME
+	string "Program name"
+	default "bootsel"
+
+config SYSTEM_BOOTSEL_PRIORITY
+	int "bootsel task priority"
+	default 100
+
+config SYSTEM_BOOTSEL_STACKSIZE
+	int "bootsel stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_BOOTSEL_RESET_STATUS
+	int "BOARDIOC_RESET status value"
+	default 3
+	---help---
+		Status value passed to BOARDIOC_RESET.  The RP23xx common reset
+		implementation uses status 3 for ROM BOOTSEL reboot.
+
+endif

@@ -1,0 +1,32 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_USERLED
+	tristate "'userled' command"
+	default n
+	depends on USERLED
+	---help---
+		Enable a command that controls the NuttX user LED character
+		driver.
+
+if SYSTEM_USERLED
+
+config SYSTEM_USERLED_PROGNAME
+	string "Program name"
+	default "userled"
+
+config SYSTEM_USERLED_PRIORITY
+	int "userled task priority"
+	default 100
+
+config SYSTEM_USERLED_STACKSIZE
+	int "userled stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_USERLED_DEVPATH
+	string "User LED device path"
+	default "/dev/userleds"
+
+endif

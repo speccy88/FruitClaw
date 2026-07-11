@@ -1,0 +1,200 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_TRMNL
+	tristate "'trmnl' display client"
+	default n
+	depends on NET && NET_TCP && VIDEO_FB
+	select LIBC_NETDB
+	select NET_SOCKOPTS
+	select NETUTILS_CJSON
+	select NETUTILS_WEBCLIENT
+	select LIB_ZLIB
+	select CRYPTO_MBEDTLS if SYSTEM_TRMNL_ENABLE_TLS
+	---help---
+		Enable a small TRMNL display client for the Adafruit Fruit Jam
+		RP2350 profile. The client reads device credentials from runtime
+		storage, fetches /api/display, downloads the returned PNG, and
+		renders it to an 800x480 FB_FMT_Y2 framebuffer.
+
+if SYSTEM_TRMNL
+
+config SYSTEM_TRMNL_PROGNAME
+	string "Program name"
+	default "trmnl"
+
+config SYSTEM_TRMNL_PRIORITY
+	int "trmnl task priority"
+	default 100
+
+config SYSTEM_TRMNL_STACKSIZE
+	int "trmnl stack size"
+	default 32768
+
+config SYSTEM_TRMNL_BOOT_AUTOSTART
+	bool "Autostart TRMNL from the board boot script"
+	default n
+	---help---
+		Start the TRMNL boot command from the Fruit Jam rcS script. The
+		boot command brings up the hosted Wi-Fi link when enabled, then
+		enters the foreground TRMNL refresh loop in the background task
+		started by rcS.
+
+config SYSTEM_TRMNL_WIFI_AUTOSTART
+	bool "Bring up hosted Wi-Fi from trmnl boot"
+	default n
+	depends on WIRELESS_WAPI_CMDTOOL && SYSTEM_DHCPC_RENEW
+	---help---
+		Allow the trmnl boot command to configure wlan0 from a small
+		runtime Wi-Fi config file and renew DHCP before fetching images.
+
+config SYSTEM_TRMNL_WIFI_IFNAME
+	string "TRMNL Wi-Fi interface name"
+	default "wlan0"
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+
+config SYSTEM_TRMNL_WIFI_CONFIG_PATH
+	string "TRMNL Wi-Fi config path"
+	default "/mnt/sd0/trmnl_wifi.conf"
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+	---help---
+		Absolute path to a runtime Wi-Fi config. Supported keys are ssid,
+		password or psk, key_mgmt, and cipher. If this file is absent,
+		trmnl boot also tries SYSTEM_TRMNL_WIFI_CONFIG_LEAF inside the
+		selected TRMNL data directory.
+
+config SYSTEM_TRMNL_WIFI_CONFIG_LEAF
+	string "TRMNL Wi-Fi config leaf"
+	default "wifi.conf"
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+
+config SYSTEM_TRMNL_BOOT_WIFI_RETRIES
+	int "TRMNL boot Wi-Fi retry count"
+	default 8
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+	---help---
+		Number of Wi-Fi bring-up attempts made by trmnl boot before it
+		gives up. This absorbs early boot races where rcS starts before
+		ESP-hosted has finished registering wlan0.
+
+config SYSTEM_TRMNL_BOOT_WIFI_RETRY_DELAY
+	int "TRMNL boot Wi-Fi retry delay"
+	default 2
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+	---help---
+		Delay in seconds between trmnl boot Wi-Fi bring-up attempts.
+
+config SYSTEM_TRMNL_WIFI_DEFAULT_SSID
+	string "Compiled fallback Wi-Fi SSID"
+	default ""
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+	---help---
+		Optional bring-up fallback used only when the Wi-Fi config file is
+		absent. Leave empty for reusable/community builds.
+
+config SYSTEM_TRMNL_WIFI_DEFAULT_PSK
+	string "Compiled fallback Wi-Fi PSK"
+	default ""
+	depends on SYSTEM_TRMNL_WIFI_AUTOSTART
+	---help---
+		Optional bring-up fallback used only when the Wi-Fi config file is
+		absent. Leave empty for reusable/community builds.
+
+config SYSTEM_TRMNL_FB_DEVPATH
+	string "Framebuffer device path"
+	default "/dev/fb0"
+
+config SYSTEM_TRMNL_SD_DATA_DIR
+	string "TRMNL SD data directory"
+	default "/mnt/sd0/trmnl"
+
+config SYSTEM_TRMNL_FLASH_DATA_DIR
+	string "TRMNL on-board flash data directory"
+	default "/flash/trmnl"
+	---help---
+		Optional persistent fallback directory for credentials and state.
+		The Fruit Jam board layer must mount a flash-backed filesystem at
+		this path's parent directory. If the parent is absent, trmnl skips
+		this location and falls back to SYSTEM_TRMNL_DATA_DIR.
+
+config SYSTEM_TRMNL_DATA_DIR
+	string "TRMNL fallback data directory"
+	default "/data/trmnl"
+
+config SYSTEM_TRMNL_MAX_JSON
+	int "Maximum API JSON response bytes"
+	default 8192
+
+config SYSTEM_TRMNL_MAX_PNG
+	int "Maximum downloaded PNG bytes"
+	default 1048576
+
+config SYSTEM_TRMNL_MAX_URL
+	int "Maximum image URL bytes"
+	default 2048
+
+config SYSTEM_TRMNL_DEFAULT_API_URL
+	string "Default TRMNL API URL"
+	default "https://usetrmnl.com/api"
+
+config SYSTEM_TRMNL_DEFAULT_ID
+	string "Compiled fallback TRMNL device ID"
+	default ""
+	---help---
+		Optional bring-up fallback used only when device.json is absent.
+		Leave empty for reusable/community builds so credentials stay in
+		runtime storage.
+
+config SYSTEM_TRMNL_DEFAULT_TOKEN
+	string "Compiled fallback TRMNL access token"
+	default ""
+	---help---
+		Optional bring-up fallback used only when device.json is absent.
+		Leave empty for reusable/community builds so credentials stay in
+		runtime storage.
+
+config SYSTEM_TRMNL_FW_VERSION
+	string "TRMNL client firmware version header"
+	default "fruitjam-nuttx-0.1"
+
+config SYSTEM_TRMNL_MODEL
+	string "TRMNL model header"
+	default "fruitjam-nuttx"
+
+config SYSTEM_TRMNL_DEFAULT_REFRESH_SEC
+	int "Default refresh interval in seconds"
+	default 900
+
+config SYSTEM_TRMNL_HTTP_TIMEOUT_SEC
+	int "HTTP timeout in seconds"
+	default 30
+
+config SYSTEM_TRMNL_ENABLE_TLS
+	bool "Enable HTTPS through mbedTLS"
+	default y
+
+config SYSTEM_TRMNL_TLS_CA_CERT_PATH
+	string "TLS CA bundle path"
+	default "/mnt/sd0/trmnl/certs/roots.pem"
+	depends on SYSTEM_TRMNL_ENABLE_TLS
+
+config SYSTEM_TRMNL_TLS_ALLOW_UNVERIFIED
+	bool "Allow unverified TLS certificates"
+	default n
+	depends on SYSTEM_TRMNL_ENABLE_TLS
+	---help---
+		Permit HTTPS without a CA bundle. Use only during bring-up.
+
+config SYSTEM_TRMNL_BOOT_GUARD
+	bool "Arm Fruit Jam BOOTSEL guard around TRMNL commands"
+	default y
+	depends on ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+	---help---
+		Wrap finite TRMNL commands with the Fruit Jam board boot guard.
+		If a framebuffer, filesystem, HTTP, or decode path wedges, the
+		board guard returns to ROM BOOTSEL instead of leaving the serial
+		console stuck until a manual reset.
+
+endif

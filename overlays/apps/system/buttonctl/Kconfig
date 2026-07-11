@@ -1,0 +1,31 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_BUTTONCTL
+	tristate "'buttonctl' command"
+	default n
+	depends on INPUT_BUTTONS
+	---help---
+		Enable a command that reads the NuttX buttons character driver.
+
+if SYSTEM_BUTTONCTL
+
+config SYSTEM_BUTTONCTL_PROGNAME
+	string "Program name"
+	default "buttonctl"
+
+config SYSTEM_BUTTONCTL_PRIORITY
+	int "buttonctl task priority"
+	default 100
+
+config SYSTEM_BUTTONCTL_STACKSIZE
+	int "buttonctl stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_BUTTONCTL_DEVPATH
+	string "Buttons device path"
+	default "/dev/buttons"
+
+endif

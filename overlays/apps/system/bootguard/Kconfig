@@ -1,0 +1,32 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_BOOTGUARD
+	tristate "'bootguard' command"
+	default n
+	depends on WATCHDOG && ARCH_CHIP_RP23XX
+	---help---
+		Enable a command that can inspect, arm, kick, and disarm the
+		RP23xx diagnostic BOOTSEL recovery guard used during board bring-up.
+
+if SYSTEM_BOOTGUARD
+
+config SYSTEM_BOOTGUARD_PROGNAME
+	string "Program name"
+	default "bootguard"
+
+config SYSTEM_BOOTGUARD_PRIORITY
+	int "bootguard task priority"
+	default 100
+
+config SYSTEM_BOOTGUARD_STACKSIZE
+	int "bootguard stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_BOOTGUARD_DEVPATH
+	string "watchdog device path"
+	default "/dev/watchdog0"
+
+endif

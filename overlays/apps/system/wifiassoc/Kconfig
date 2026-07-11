@@ -1,0 +1,62 @@
+config SYSTEM_WIFIASSOC
+	tristate "WiFi association helper"
+	default n
+	depends on WIRELESS_WAPI && NETUTILS_DHCPC
+	---help---
+		Enable a small NSH helper that associates a wireless interface with
+		a WPA2/CCMP network and optionally runs DHCP.
+
+if SYSTEM_WIFIASSOC
+
+config SYSTEM_WIFIASSOC_PROGNAME
+	string "Program name"
+	default "wifiassoc"
+
+config SYSTEM_WIFIASSOC_PRIORITY
+	int "Task priority"
+	default 100
+
+config SYSTEM_WIFIASSOC_STACKSIZE
+	int "Stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_WIFIASSOC_ASSOC_RETRIES
+	int "Association retries"
+	default 5
+	---help---
+		Number of times to retry the WAPI association sequence before
+		failing.
+
+config SYSTEM_WIFIASSOC_ASSOC_DELAY_MS
+	int "Delay before each association attempt"
+	default 1500
+	---help---
+		Delay between association attempts.  The RP2350 Pico W Broadcom
+		interface can need a short settling period after wlan0 is brought up.
+
+config SYSTEM_WIFIASSOC_DHCP_RETRIES
+	int "DHCP retries"
+	default 5
+
+config SYSTEM_WIFIASSOC_DHCP_DELAY_MS
+	int "Delay before each DHCP attempt"
+	default 1500
+
+config SYSTEM_WIFIASSOC_BOARDINIT
+	bool "Request board wireless initialization before association"
+	default n
+	depends on BOARDCTL && BOARDCTL_IOCTL
+	---help---
+		Call a board-specific BOARDIOC_USER command before bringing up the
+		wireless interface.  This lets WiFi hardware initialization remain
+		deferred until association, so the USB console can enumerate first.
+
+config SYSTEM_WIFIASSOC_BOARDINIT_ARG
+	int "BOARDIOC_USER command offset for WiFi association"
+	default 0
+	depends on SYSTEM_WIFIASSOC_BOARDINIT
+	---help---
+		Offset added to BOARDIOC_USER for the board's WiFi initialization
+		command.  Pico 2 W uses offset 1.
+
+endif

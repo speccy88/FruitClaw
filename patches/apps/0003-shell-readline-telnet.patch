@@ -1,0 +1,1259 @@
+diff --git a/nshlib/Kconfig b/nshlib/Kconfig
+index 1f78a50ae..6ca703442 100644
+--- a/nshlib/Kconfig
++++ b/nshlib/Kconfig
+@@ -1001,6 +1001,48 @@ config USBDEV_MINOR
+ 		If there are more than one USB devices, then a USB device
+ 		minor number may also need to be provided. Default: 0
+ 
++config NSH_USBCONSOLE_WAIT_INPUT
++	bool "Wait for ENTER before starting USB console"
++	default y
++	---help---
++		If defined, NSH waits until it reads three newline characters from
++		the USB serial console before starting the interactive session. This
++		preserves the traditional behavior where the user presses ENTER a
++		few times after opening the host terminal.
++
++		If disabled, NSH starts the session as soon as the USB serial device
++		can be opened. This is useful for CDC ACM consoles where host
++		open/close sequencing can otherwise leave the board waiting even
++		though the USB device is already enumerated.
++
++config NSH_USBCONSOLE_CONNECT_DELAY
++	int "USB console connect delay in milliseconds"
++	default 0
++	depends on !NSH_USBCONSOLE_WAIT_INPUT
++	---help---
++		If non-zero, NSH waits this many milliseconds after the USB serial
++		device opens before starting the interactive session. This gives the
++		host terminal time to finish configuring termios and modem-control
++		lines before NSH prints the first prompt and blocks in readline.
++
++config NSH_USBCONSOLE_WAIT_DTR
++	bool "Wait for USB CDC DTR before starting console"
++	default n
++	depends on !NSH_USBCONSOLE_WAIT_INPUT && CDCACM
++	---help---
++		If enabled, NSH waits for the host to assert CDC DTR before starting
++		the interactive session. This avoids losing the first prompt or
++		starting readline while the host terminal is still configuring the
++		USB CDC port.
++
++config NSH_USBCONSOLE_WAIT_DTR_TIMEOUT
++	int "USB CDC DTR wait timeout in milliseconds"
++	default 5000
++	depends on NSH_USBCONSOLE_WAIT_DTR
++	---help---
++		Maximum time to wait for DTR before starting the console anyway.
++		Use 0 to wait indefinitely.
++
+ endif # NSH_USBCONSOLE
+ 
+ config NSH_ALTCONDEV
+diff --git a/nshlib/nsh_command.c b/nshlib/nsh_command.c
+index a50e223c9..7cbd2ebeb 100644
+--- a/nshlib/nsh_command.c
++++ b/nshlib/nsh_command.c
+@@ -380,8 +380,9 @@ static const struct cmdmap_s g_cmdmap[] =
+ 
+ #if !defined(CONFIG_DISABLE_MOUNTPOINT) && defined(CONFIG_FSUTILS_MKFATFS)
+ #  ifndef CONFIG_NSH_DISABLE_MKFATFS
+-  CMD_MAP("mkfatfs",  cmd_mkfatfs,  2, 6,
+-    "[-F <fatsize>] [-r <rootdirentries>] <block-driver>"),
++  CMD_MAP("mkfatfs",  cmd_mkfatfs,  2, 10,
++    "[-F <fatsize>] [-c <clustershift>] [-n <nfats>]"
++    " [-r <rootdirentries>] <block-driver>"),
+ #  endif
+ #endif
+ 
+diff --git a/nshlib/nsh_fscmds.c b/nshlib/nsh_fscmds.c
+index a3423494c..eb8d9da06 100644
+--- a/nshlib/nsh_fscmds.c
++++ b/nshlib/nsh_fscmds.c
+@@ -1933,15 +1933,32 @@ int cmd_mkfatfs(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
+   bool badarg;
+   int option;
+   int rootdirentries;
++  int clustshift;
++  int nfats;
+   int ret = ERROR;
+ 
+-  /* mkfatfs [-F <fatsize>] <block-driver> */
++  /* mkfatfs [-F <fatsize>] [-c <clustershift>] [-n <nfats>]
++   *         <block-driver>
++   */
+ 
+   badarg = false;
+-  while ((option = getopt(argc, argv, ":F:r:")) != ERROR)
++  while ((option = getopt(argc, argv, ":F:c:n:r:")) != ERROR)
+     {
+       switch (option)
+         {
++          case 'c':
++            clustshift = atoi(optarg);
++            if (clustshift >= 0 && clustshift <= 7)
++              {
++                fmt.ff_clustshift = clustshift;
++              }
++            else
++              {
++                nsh_error(vtbl, g_fmtargrange, argv[0]);
++                badarg = true;
++              }
++            break;
++
+           case 'F':
+             fmt.ff_fattype = atoi(optarg);
+             if (fmt.ff_fattype != 0  && fmt.ff_fattype != 12 &&
+@@ -1952,6 +1969,19 @@ int cmd_mkfatfs(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
+               }
+             break;
+ 
++         case 'n':
++            nfats = atoi(optarg);
++            if (nfats >= 1 && nfats <= 4)
++              {
++                fmt.ff_nfats = nfats;
++              }
++            else
++              {
++                nsh_error(vtbl, g_fmtargrange, argv[0]);
++                badarg = true;
++              }
++            break;
++
+          case 'r':
+             rootdirentries = atoi(optarg);
+             if (rootdirentries >= 0)
+diff --git a/nshlib/nsh_usbconsole.c b/nshlib/nsh_usbconsole.c
+index 74f8a4795..8c05d83c9 100644
+--- a/nshlib/nsh_usbconsole.c
++++ b/nshlib/nsh_usbconsole.c
+@@ -27,6 +27,7 @@
+ #include <nuttx/config.h>
+ 
+ #include <sys/boardctl.h>
++#include <sys/ioctl.h>
+ 
+ #include <stdlib.h>
+ #include <unistd.h>
+@@ -34,7 +35,12 @@
+ #include <assert.h>
+ #include <nuttx/debug.h>
+ 
++#ifdef CONFIG_SERIAL_TERMIOS
++#  include <termios.h>
++#endif
++
+ #ifdef CONFIG_CDCACM
++#  include <nuttx/usb/cdc.h>
+ #  include <nuttx/usb/cdcacm.h>
+ #endif
+ 
+@@ -49,6 +55,12 @@
+ 
+ #ifdef HAVE_USB_CONSOLE
+ 
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++static int g_usbstdiofd = -1;
++
+ /****************************************************************************
+  * Private Functions
+  ****************************************************************************/
+@@ -70,6 +82,114 @@ static void nsh_configstdio(int fd)
+   dup2(fd, 2);
+ }
+ 
++/****************************************************************************
++ * Name: nsh_closeusbstdio
++ ****************************************************************************/
++
++static void nsh_closeusbstdio(FAR struct console_stdio_s *pstate)
++{
++  if (g_usbstdiofd >= 0)
++    {
++      close(g_usbstdiofd);
++      g_usbstdiofd = -1;
++    }
++
++  INFD(pstate)  = STDIN_FILENO;
++  OUTFD(pstate) = STDOUT_FILENO;
++  ERRFD(pstate) = STDERR_FILENO;
++}
++
++/****************************************************************************
++ * Name: nsh_configusbtermios
++ ****************************************************************************/
++
++#ifdef CONFIG_SERIAL_TERMIOS
++static void nsh_configusbtermios(int fd)
++{
++  struct termios cfg;
++
++  if (tcgetattr(fd, &cfg) == 0)
++    {
++      cfg.c_iflag = 0;
++      cfg.c_oflag = OPOST | ONLCR;
++      cfg.c_lflag = ISIG;
++      cfg.c_cc[VMIN] = 1;
++      cfg.c_cc[VTIME] = 0;
++
++      tcsetattr(fd, TCSANOW, &cfg);
++    }
++}
++#endif
++
++/****************************************************************************
++ * Name: nsh_configusbstdio
++ *
++ * Description:
++ *   Configure standard I/O and the NSH front-end to use the live USB
++ *   descriptor.
++ *
++ ****************************************************************************/
++
++static void nsh_configusbstdio(FAR struct console_stdio_s *pstate, int fd)
++{
++  if (g_usbstdiofd >= 0 && g_usbstdiofd != fd)
++    {
++      close(g_usbstdiofd);
++    }
++
++  g_usbstdiofd = fd;
++
++  nsh_configstdio(fd);
++
++#ifdef CONFIG_SERIAL_TERMIOS
++  nsh_configusbtermios(fd);
++#endif
++
++  INFD(pstate)  = fd;
++  OUTFD(pstate) = fd;
++  ERRFD(pstate) = fd;
++}
++
++/****************************************************************************
++ * Name: nsh_waitusbdtr
++ *
++ * Description:
++ *   Wait until the CDC ACM host asserts DTR.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_NSH_USBCONSOLE_WAIT_DTR
++static void nsh_waitusbdtr(int fd)
++{
++  int elapsed = 0;
++  int ctrlline;
++
++  for (; ; )
++    {
++      ctrlline = 0;
++      if (ioctl(fd, CAIOC_GETCTRLLINE, (unsigned long)&ctrlline) < 0)
++        {
++          return;
++        }
++
++      if ((ctrlline & CDCACM_UART_DTR) != 0)
++        {
++          return;
++        }
++
++#if CONFIG_NSH_USBCONSOLE_WAIT_DTR_TIMEOUT > 0
++      if (elapsed >= CONFIG_NSH_USBCONSOLE_WAIT_DTR_TIMEOUT)
++        {
++          return;
++        }
++#endif
++
++      usleep(10000);
++      elapsed += 10;
++    }
++}
++#endif
++
+ /****************************************************************************
+  * Name: nsh_nullstdio
+  *
+@@ -116,9 +236,11 @@ static int nsh_nullstdio(void)
+ 
+ static int nsh_waitusbready(FAR struct console_stdio_s *pstate)
+ {
++#ifdef CONFIG_NSH_USBCONSOLE_WAIT_INPUT
+   char inch;
+   ssize_t nbytes;
+   int nlc;
++#endif
+   int fd;
+ 
+   /* Don't start the NSH console until the console device is ready.  Chances
+@@ -127,7 +249,9 @@ static int nsh_waitusbready(FAR struct console_stdio_s *pstate)
+    * host-side application opens the connection.
+    */
+ 
++#ifdef CONFIG_NSH_USBCONSOLE_WAIT_INPUT
+ restart:
++#endif
+ 
+   /* Open the USB serial device for read/write access */
+ 
+@@ -151,6 +275,24 @@ restart:
+     }
+   while (fd < 0);
+ 
++#ifndef CONFIG_NSH_USBCONSOLE_WAIT_INPUT
++  /* The USB serial device is configured.  Start the session immediately and
++   * let the command-line reader block until the host sends input.
++   */
++
++#ifdef CONFIG_NSH_USBCONSOLE_WAIT_DTR
++  nsh_waitusbdtr(fd);
++#endif
++
++#if defined(CONFIG_NSH_USBCONSOLE_CONNECT_DELAY) && \
++    CONFIG_NSH_USBCONSOLE_CONNECT_DELAY > 0
++  usleep(CONFIG_NSH_USBCONSOLE_CONNECT_DELAY * 1000);
++#endif
++
++  nsh_configusbstdio(pstate, fd);
++
++  return OK;
++#else
+   /* Now wait until we successfully read a carriage return a few times.
+    * That is a sure way of know that there is something at the other end of
+    * the USB serial connection that is ready to talk with us.  The user needs
+@@ -195,16 +337,10 @@ restart:
+ 
+   /* Configure standard I/O */
+ 
+-  nsh_configstdio(fd);
+-
+-  /* We can close the original file descriptor (unless it was one of 0-2) */
+-
+-  if (fd > 2)
+-    {
+-      close(fd);
+-    }
++  nsh_configusbstdio(pstate, fd);
+ 
+   return OK;
++#endif
+ }
+ 
+ /****************************************************************************
+@@ -310,6 +446,7 @@ int nsh_consolemain(int argc, FAR char *argv[])
+        */
+ 
+       nsh_nullstdio();
++      nsh_closeusbstdio(pstate);
+     }
+ }
+ 
+diff --git a/system/readline/Kconfig b/system/readline/Kconfig
+index f088fddee..ea8d33488 100644
+--- a/system/readline/Kconfig
++++ b/system/readline/Kconfig
+@@ -26,6 +26,15 @@ config READLINE_ECHO
+ 
+ if READLINE_ECHO
+ 
++config READLINE_FORCE_ECHO
++	bool "Force readline echo independent of termios ECHO"
++	default n
++	---help---
++		Always echo characters from readline even when the input terminal's
++		ECHO flag is not set. This is useful for USB CDC consoles whose line
++		discipline starts with driver echo disabled, but where the shell
++		should still provide a visible interactive command line.
++
+ config READLINE_TABCOMPLETION
+ 	bool "Tab completion"
+ 	default n
+diff --git a/system/readline/readline_common.c b/system/readline/readline_common.c
+index 0fd3b9396..8e8e727cf 100644
+--- a/system/readline/readline_common.c
++++ b/system/readline/readline_common.c
+@@ -27,6 +27,7 @@
+ #include <nuttx/config.h>
+ 
+ #include <stdbool.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <ctype.h>
+ #include <errno.h>
+@@ -49,6 +50,11 @@
+ #  define RL_CMDHIST_LINELEN    CONFIG_READLINE_CMD_HISTORY_LINELEN
+ #endif
+ 
++#ifdef CONFIG_READLINE_ECHO
++#  define RL_WRITE_ARRAY(vtbl, array) \
++  RL_WRITE(vtbl, array, sizeof(array))
++#endif
++
+ /****************************************************************************
+  * Private Types
+  ****************************************************************************/
+@@ -71,6 +77,8 @@ struct cmdhist_s
+ 
+ #ifdef CONFIG_READLINE_ECHO
+ static const char g_erasetoeol[] = VT100_CLEAREOL;
++static const char g_cursorleft[] = VT100_CURSORLF('1');
++static const char g_cursorright[] = VT100_CURSORRT('1');
+ #endif
+ 
+ #ifdef CONFIG_READLINE_TABCOMPLETION
+@@ -87,10 +95,107 @@ static FAR const struct extmatch_vtable_s *g_extmatch_vtbl = NULL;
+ static struct cmdhist_s g_cmdhist;
+ #endif /* CONFIG_READLINE_CMD_HISTORY */
+ 
++/* Some terminals send CRLF for the enter key.  readline_common() returns as
++ * soon as it sees the CR, so the following LF must be consumed on the next
++ * call instead of being treated as a second empty command.
++ */
++
++static bool g_skip_lf_after_cr;
++
+ /****************************************************************************
+  * Private Functions
+  ****************************************************************************/
+ 
++/****************************************************************************
++ * Name: move_cursor_left
++ ****************************************************************************/
++
++#ifdef CONFIG_READLINE_ECHO
++static void move_cursor_left(FAR struct rl_common_s *vtbl, int count)
++{
++  char seq[16];
++  int len;
++
++  if (count <= 0)
++    {
++      return;
++    }
++
++  if (count == 1)
++    {
++      RL_WRITE_ARRAY(vtbl, g_cursorleft);
++      return;
++    }
++
++  len = snprintf(seq, sizeof(seq), "\x1b[%dD", count);
++  if (len > 0 && len < (int)sizeof(seq))
++    {
++      RL_WRITE(vtbl, seq, len);
++    }
++}
++#endif
++
++/****************************************************************************
++ * Name: move_cursor_right
++ ****************************************************************************/
++
++#ifdef CONFIG_READLINE_ECHO
++static void move_cursor_right(FAR struct rl_common_s *vtbl, int count)
++{
++  char seq[16];
++  int len;
++
++  if (count <= 0)
++    {
++      return;
++    }
++
++  if (count == 1)
++    {
++      RL_WRITE_ARRAY(vtbl, g_cursorright);
++      return;
++    }
++
++  len = snprintf(seq, sizeof(seq), "\x1b[%dC", count);
++  if (len > 0 && len < (int)sizeof(seq))
++    {
++      RL_WRITE(vtbl, seq, len);
++    }
++}
++#endif
++
++/****************************************************************************
++ * Name: redraw_from_cursor
++ ****************************************************************************/
++
++#ifdef CONFIG_READLINE_ECHO
++static void redraw_from_cursor(FAR struct rl_common_s *vtbl,
++                               FAR const char *buf, int nch, int cursor)
++{
++  int tail = nch - cursor;
++
++  if (tail > 0)
++    {
++      RL_WRITE(vtbl, &buf[cursor], tail);
++    }
++
++  RL_WRITE_ARRAY(vtbl, g_erasetoeol);
++  move_cursor_left(vtbl, tail);
++}
++#endif
++
++/****************************************************************************
++ * Name: clear_input_line
++ ****************************************************************************/
++
++#ifdef CONFIG_READLINE_ECHO
++static void clear_input_line(FAR struct rl_common_s *vtbl, int cursor)
++{
++  move_cursor_left(vtbl, cursor);
++  RL_WRITE_ARRAY(vtbl, g_erasetoeol);
++}
++#endif
++
+ /****************************************************************************
+  * Name: count_builtin_matches
+  *
+@@ -477,6 +582,7 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+                         int buflen)
+ {
+   int escape;
++  int cursor;
+   int nch;
+ #ifdef CONFIG_READLINE_CMD_HISTORY
+   int i;
+@@ -495,7 +601,7 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+   /* <esc>[K is the VT100 command that erases to the end of the line. */
+ 
+ #ifdef CONFIG_READLINE_ECHO
+-  RL_WRITE(vtbl, g_erasetoeol, sizeof(g_erasetoeol));
++  RL_WRITE_ARRAY(vtbl, g_erasetoeol);
+ #endif
+ 
+   /* Read characters until we have a full line. On each the loop we must
+@@ -504,6 +610,7 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+    */
+ 
+   escape = 0;
++  cursor = 0;
+   nch    = 0;
+ 
+   for (; ; )
+@@ -534,95 +641,199 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+           return EOF;
+         }
+ 
++      if (g_skip_lf_after_cr)
++        {
++          g_skip_lf_after_cr = false;
++          if (ch == '\n')
++            {
++              continue;
++            }
++        }
++
+       /* Are we processing a VT100 escape sequence */
+ 
+-      else if (escape)
++      if (escape)
+         {
+-          /* Yes, is it an <esc>[, 3 byte sequence */
++          /* Yes.  Track CSI arrow/editing sequences. */
+ 
+-          if (ch != ASCII_LBRACKET || escape == 2)
++          if (escape == 1)
+             {
+-              /* We are finished with the escape sequence */
++              if (ch == ASCII_LBRACKET)
++                {
++                  escape = 2;
++                }
++              else
++                {
++                  escape = 0;
++                }
+ 
+-#ifdef CONFIG_READLINE_CMD_HISTORY
+-              /* Intercept up and down arrow keys */
++              continue;
++            }
+ 
+-              if (g_cmdhist.len > 0)
++          if (escape == 2 && ch >= ASCII_0 && ch <= ASCII_9)
++            {
++              escape = ch;
++              continue;
++            }
++
++          if (escape >= ASCII_0 && escape <= ASCII_9)
++            {
++              int parameter = escape;
++
++              escape = 0;
++              if (ch == '~')
+                 {
+-                  if (ch == 'A') /* up arrow */
++                  switch (parameter)
+                     {
+-                      /* Go to the past command in history */
++                      case ASCII_1:
++                      case ASCII_7:
++#ifdef CONFIG_READLINE_ECHO
++                        move_cursor_left(vtbl, cursor);
++#endif
++                        cursor = 0;
++                        break;
+ 
+-                      g_cmdhist.offset--;
++                      case ASCII_3:
++                        if (cursor < nch)
++                          {
++                            int tail = nch - cursor - 1;
+ 
+-                      if (-g_cmdhist.offset >= g_cmdhist.len)
+-                        {
+-                          g_cmdhist.offset = -(g_cmdhist.len - 1);
+-                        }
++                            if (tail > 0)
++                              {
++                                memmove(&buf[cursor], &buf[cursor + 1],
++                                        tail);
++                              }
++
++                            nch--;
++                            buf[nch] = '\0';
++
++#ifdef CONFIG_READLINE_ECHO
++                            redraw_from_cursor(vtbl, buf, nch, cursor);
++#endif
++                          }
++                        break;
++
++                      case ASCII_4:
++                      case ASCII_8:
++#ifdef CONFIG_READLINE_ECHO
++                        move_cursor_right(vtbl, nch - cursor);
++#endif
++                        cursor = nch;
++                        break;
+                     }
+-                  else if (ch == 'B') /* down arrow */
+-                    {
+-                      /* Go to the recent command in history */
++                }
+ 
+-                      g_cmdhist.offset++;
++              continue;
++            }
+ 
+-                      if (g_cmdhist.offset > 1)
+-                        {
+-                          g_cmdhist.offset = 1;
+-                        }
++#ifdef CONFIG_READLINE_CMD_HISTORY
++          /* Intercept up and down arrow keys */
++
++          if ((ch == 'A' || ch == 'B') && g_cmdhist.len > 0)
++            {
++              if (ch == 'A') /* up arrow */
++                {
++                  /* Go to the past command in history */
++
++                  g_cmdhist.offset--;
++
++                  if (-g_cmdhist.offset >= g_cmdhist.len)
++                    {
++                      g_cmdhist.offset = -(g_cmdhist.len - 1);
+                     }
++                }
++              else /* down arrow */
++                {
++                  /* Go to the recent command */
+ 
+-                  /* Clear out current command from the prompt */
++                  g_cmdhist.offset++;
+ 
+-                  while (nch > 0)
++                  if (g_cmdhist.offset > 1)
+                     {
+-                      nch--;
++                      g_cmdhist.offset = 1;
++                    }
++                }
+ 
+ #ifdef CONFIG_READLINE_ECHO
+-                      RL_PUTC(vtbl, ASCII_BS);
+-                      RL_WRITE(vtbl, g_erasetoeol, sizeof(g_erasetoeol));
++              clear_input_line(vtbl, cursor);
+ #endif
+-                    }
++              nch    = 0;
++              cursor = 0;
+ 
+-                  if (g_cmdhist.offset != 1)
+-                    {
+-                      int idx = g_cmdhist.head + g_cmdhist.offset;
++              if (g_cmdhist.offset != 1)
++                {
++                  int idx = g_cmdhist.head + g_cmdhist.offset;
+ 
+-                      /* Circular buffer wrap around */
++                  /* Circular buffer wrap around */
+ 
+-                      if (idx < 0)
+-                        {
+-                          idx = idx + RL_CMDHIST_LEN;
+-                        }
+-                      else if (idx >= RL_CMDHIST_LEN)
+-                        {
+-                          idx = idx - RL_CMDHIST_LEN;
+-                        }
++                  if (idx < 0)
++                    {
++                      idx = idx + RL_CMDHIST_LEN;
++                    }
++                  else if (idx >= RL_CMDHIST_LEN)
++                    {
++                      idx = idx - RL_CMDHIST_LEN;
++                    }
+ 
+-                      for (i = 0; g_cmdhist.buf[idx][i] != '\0'; i++)
++                  for (i = 0; g_cmdhist.buf[idx][i] != '\0'; i++)
++                    {
++                      if (nch + 1 >= buflen)
+                         {
+-                          buf[nch++] = g_cmdhist.buf[idx][i];
+-                          RL_PUTC(vtbl, g_cmdhist.buf[idx][i]);
++                          break;
+                         }
+ 
+-                      buf[nch] = '\0';
++                      buf[nch++] = g_cmdhist.buf[idx][i];
+                     }
++
++                  cursor = nch;
++#ifdef CONFIG_READLINE_ECHO
++                  RL_WRITE(vtbl, buf, nch);
++#endif
+                 }
+-#endif /* CONFIG_READLINE_CMD_HISTORY */
+ 
++              buf[nch] = '\0';
+               escape = 0;
+-              ch = 'a';
++              continue;
+             }
+-          else
+-            {
+-              /* The next character is the end of a 3-byte sequence.
+-               * NOTE:  Some of the <esc>[ sequences are longer than
+-               * 3-bytes, but I have not encountered any in normal use
+-               * yet and, so, have not provided the decoding logic.
+-               */
++#endif /* CONFIG_READLINE_CMD_HISTORY */
+ 
+-              escape = 2;
++          if (ch == 'C') /* right arrow */
++            {
++              if (cursor < nch)
++                {
++#ifdef CONFIG_READLINE_ECHO
++                  move_cursor_right(vtbl, 1);
++#endif
++                  cursor++;
++                }
+             }
++          else if (ch == 'D') /* left arrow */
++            {
++              if (cursor > 0)
++                {
++#ifdef CONFIG_READLINE_ECHO
++                  move_cursor_left(vtbl, 1);
++#endif
++                  cursor--;
++                }
++            }
++          else if (ch == 'H') /* home */
++            {
++#ifdef CONFIG_READLINE_ECHO
++              move_cursor_left(vtbl, cursor);
++#endif
++              cursor = 0;
++            }
++          else if (ch == 'F') /* end */
++            {
++#ifdef CONFIG_READLINE_ECHO
++              move_cursor_right(vtbl, nch - cursor);
++#endif
++              cursor = nch;
++            }
++
++          escape = 0;
++          continue;
+         }
+ 
+       /* Check for backspace
+@@ -636,11 +847,21 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+ 
+       else if (ch == ASCII_BS || ch == ASCII_DEL)
+         {
+-          /* Eliminate that last character in the buffer. */
++          /* Eliminate the character to the left of the cursor. */
+ 
+-          if (nch > 0)
++          if (cursor > 0)
+             {
++              int tail;
++
++              cursor--;
++              tail = nch - cursor - 1;
++              if (tail > 0)
++                {
++                  memmove(&buf[cursor], &buf[cursor + 1], tail);
++                }
++
+               nch--;
++              buf[nch] = '\0';
+ 
+ #ifdef CONFIG_READLINE_ECHO
+               /* Echo the backspace character on the console.  Always output
+@@ -649,7 +870,7 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+                */
+ 
+               RL_PUTC(vtbl, ASCII_BS);
+-              RL_WRITE(vtbl, g_erasetoeol, sizeof(g_erasetoeol));
++              redraw_from_cursor(vtbl, buf, nch, cursor);
+ #endif
+             }
+         }
+@@ -668,8 +889,10 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+        * others both.
+        */
+ 
+-      else if (ch == '\n')
++      else if (ch == '\n' || ch == '\r')
+         {
++          g_skip_lf_after_cr = (ch == '\r');
++
+ #ifdef CONFIG_READLINE_CMD_HISTORY
+           /* Save history of command, only if there was something
+            * typed besides return character.
+@@ -702,6 +925,14 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+             }
+ #endif /* CONFIG_READLINE_CMD_HISTORY */
+ 
++#ifdef CONFIG_READLINE_ECHO
++          /* The serial console may not locally echo the enter key.  Echo a
++           * line feed here so the next prompt starts on a fresh line.
++           */
++
++          RL_PUTC(vtbl, '\n');
++#endif
++
+           /* The newline is stored in the buffer along with the null
+            * terminator.
+            */
+@@ -718,8 +949,6 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+ 
+       else if (!iscntrl(ch & 0xff))
+         {
+-          buf[nch++] = ch;
+-
+           /* Check if there is room for another character and the line's
+            * null terminator.  If not then we have to end the line now.
+            */
+@@ -729,11 +958,39 @@ ssize_t readline_common(FAR struct rl_common_s *vtbl, FAR char *buf,
+               buf[nch] = '\0';
+               return nch;
+             }
++
++          if (cursor < nch)
++            {
++              memmove(&buf[cursor + 1], &buf[cursor], nch - cursor);
++              buf[cursor] = ch;
++              nch++;
++              cursor++;
++              buf[nch] = '\0';
++
++#ifdef CONFIG_READLINE_ECHO
++              RL_PUTC(vtbl, ch);
++              redraw_from_cursor(vtbl, buf, nch, cursor);
++#endif
++            }
++          else
++            {
++              buf[nch++] = ch;
++              cursor = nch;
++              buf[nch] = '\0';
++
++#ifdef CONFIG_READLINE_ECHO
++              RL_PUTC(vtbl, ch);
++#endif
++            }
+         }
+ #ifdef CONFIG_READLINE_TABCOMPLETION
+       else if (ch == '\t') /* TAB character */
+         {
+-          tab_completion(vtbl, buf, buflen, &nch);
++          if (cursor == nch)
++            {
++              tab_completion(vtbl, buf, buflen, &nch);
++              cursor = nch;
++            }
+         }
+ #endif
+     }
+diff --git a/system/readline/readline_fd.c b/system/readline/readline_fd.c
+index 2a37d2335..0b0f03252 100644
+--- a/system/readline/readline_fd.c
++++ b/system/readline/readline_fd.c
+@@ -30,6 +30,7 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <assert.h>
++#include <stdbool.h>
+ #include <termios.h>
+ 
+ #include "system/readline.h"
+@@ -107,16 +108,64 @@ static int readline_getc(FAR struct rl_common_s *vtbl)
+   return (int)buffer;
+ }
+ 
++#ifdef CONFIG_READLINE_ECHO
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define READLINE_WRITE_RETRY_USEC 1000
++#define READLINE_WRITE_MAX_STALLS 200
++
++/****************************************************************************
++ * Name: readline_write_all
++ ****************************************************************************/
++
++static void readline_write_all(int fd, FAR const char *buffer,
++                               size_t buflen)
++{
++  unsigned int stalls = 0;
++  size_t total = 0;
++
++  while (total < buflen)
++    {
++      ssize_t nwritten = write(fd, buffer + total, buflen - total);
++
++      if (nwritten > 0)
++        {
++          total += nwritten;
++          stalls = 0;
++        }
++      else if (nwritten < 0)
++        {
++          int errcode = errno;
++
++          if (errcode == EINTR)
++            {
++              continue;
++            }
++
++          if (errcode != EAGAIN && errcode != EWOULDBLOCK)
++            {
++              break;
++            }
++        }
++
++      if (++stalls >= READLINE_WRITE_MAX_STALLS)
++        {
++          break;
++        }
++
++      usleep(READLINE_WRITE_RETRY_USEC);
++    }
++}
+ /****************************************************************************
+  * Name: readline_putc
+  ****************************************************************************/
+ 
+-#ifdef CONFIG_READLINE_ECHO
+ static void readline_putc(FAR struct rl_common_s *vtbl, int ch)
+ {
+   FAR struct readline_s *priv = (FAR struct readline_s *)vtbl;
+   char buffer = ch;
+-  ssize_t nwritten;
+ 
+   DEBUGASSERT(priv);
+ 
+@@ -127,24 +176,7 @@ static void readline_putc(FAR struct rl_common_s *vtbl, int ch)
+       return;
+     }
+ 
+-  /* Loop until we successfully write a character (or until an unexpected
+-   * error occurs).
+-   */
+-
+-  do
+-    {
+-      /* Write the character to the outgoing stream */
+-
+-      nwritten = write(priv->outfd, &buffer, 1);
+-
+-      /* Check for irrecoverable write errors. */
+-
+-      if (nwritten < 0 && errno != EINTR)
+-        {
+-          break;
+-        }
+-    }
+-  while (nwritten < 1);
++  readline_write_all(priv->outfd, &buffer, 1);
+ }
+ #endif
+ 
+@@ -166,7 +198,7 @@ static void readline_write(FAR struct rl_common_s *vtbl,
+       return;
+     }
+ 
+-  write(priv->outfd, buffer, buflen);
++  readline_write_all(priv->outfd, buffer, buflen);
+ }
+ #endif
+ 
+@@ -209,17 +241,32 @@ ssize_t readline_fd(FAR char *buf, int buflen, int infd, int outfd)
+ 
+   struct readline_s vtbl;
+   struct termios cfg;
++  bool is_tty = false;
++  bool canon = false;
++#ifdef CONFIG_READLINE_ECHO
++  bool echo = true;
++#endif
+   ssize_t ret;
+ 
+   if (isatty(infd))
+     {
++      is_tty = true;
+       tcgetattr(infd, &cfg);
+       if (cfg.c_lflag & ICANON)
+         {
++          canon = true;
+           cfg.c_lflag &= ~ICANON;
+           tcsetattr(infd, TCSANOW, &cfg);
+           cfg.c_lflag |= ICANON;
+         }
++
++#ifdef CONFIG_READLINE_ECHO
++#ifdef CONFIG_READLINE_FORCE_ECHO
++      echo = true;
++#else
++      echo = (cfg.c_lflag & ECHO) != 0;
++#endif
++#endif
+     }
+ 
+   /* Set up the vtbl structure */
+@@ -230,14 +277,14 @@ ssize_t readline_fd(FAR char *buf, int buflen, int infd, int outfd)
+ #ifdef CONFIG_READLINE_ECHO
+   vtbl.vtbl.rl_putc  = readline_putc;
+   vtbl.vtbl.rl_write = readline_write;
+-  vtbl.outfd         = outfd;
++  vtbl.outfd         = echo ? outfd : -1;
+ #endif
+ 
+   /* The let the common readline logic do the work */
+ 
+   ret = readline_common(&vtbl.vtbl, buf, buflen);
+ 
+-  if (isatty(infd) && (cfg.c_lflag & ICANON))
++  if (is_tty && canon)
+     {
+       tcsetattr(infd, TCSANOW, &cfg);
+     }
+diff --git a/system/telnetd/Kconfig b/system/telnetd/Kconfig
+index f3ad64de4..16bb3e81e 100644
+--- a/system/telnetd/Kconfig
++++ b/system/telnetd/Kconfig
+@@ -34,6 +34,14 @@ config SYSTEM_TELNETD_PORT
+ 		The telnet daemon will listen on this TCP port number for connections.
+ 		Default: 23
+ 
++config SYSTEM_TELNETD_PID_PATH
++	string "Telnetd daemon PID file"
++	default "/tmp/telnetd.pid"
++	---help---
++		Path where the telnetd application records the daemon PID when it is
++		started in daemon mode. The same application can later be called with
++		-k to stop that daemon.
++
+ config SYSTEM_TELNETD_SESSION_PRIORITY
+ 	int "Telnetd session task priority"
+ 	default 100
+diff --git a/system/telnetd/telnetd.c b/system/telnetd/telnetd.c
+index 5d861b1b1..c7487a5e6 100644
+--- a/system/telnetd/telnetd.c
++++ b/system/telnetd/telnetd.c
+@@ -27,6 +27,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <unistd.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <signal.h>
+ 
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+@@ -34,6 +37,101 @@
+ #include "netutils/telnetd.h"
+ #include "nshlib/nshlib.h"
+ 
++#ifndef CONFIG_SYSTEM_TELNETD_PID_PATH
++#  define CONFIG_SYSTEM_TELNETD_PID_PATH "/tmp/telnetd.pid"
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++static int telnetd_write_pid(void)
++{
++  char buf[24];
++  int fd;
++  int len;
++  ssize_t n;
++
++  fd = open(CONFIG_SYSTEM_TELNETD_PID_PATH, O_WRONLY | O_CREAT | O_TRUNC,
++            0664);
++  if (fd < 0)
++    {
++      return -errno;
++    }
++
++  len = snprintf(buf, sizeof(buf), "%ld\n", (long)getpid());
++  n = write(fd, buf, len);
++  close(fd);
++  return n == len ? 0 : -EIO;
++}
++
++static int telnetd_read_pid(pid_t *pid)
++{
++  char buf[24];
++  char *end;
++  long value;
++  int fd;
++  ssize_t n;
++
++  if (pid == NULL)
++    {
++      return -EINVAL;
++    }
++
++  fd = open(CONFIG_SYSTEM_TELNETD_PID_PATH, O_RDONLY);
++  if (fd < 0)
++    {
++      return -errno;
++    }
++
++  n = read(fd, buf, sizeof(buf) - 1);
++  close(fd);
++  if (n <= 0)
++    {
++      return n < 0 ? -errno : -EINVAL;
++    }
++
++  buf[n] = '\0';
++  value = strtol(buf, &end, 10);
++  if (end == buf || value <= 0)
++    {
++      return -EINVAL;
++    }
++
++  *pid = (pid_t)value;
++  return 0;
++}
++
++static int telnetd_stop(void)
++{
++  pid_t pid = 0;
++  int ret;
++
++  ret = telnetd_read_pid(&pid);
++  if (ret < 0)
++    {
++      fprintf(stderr, "telnetd: no daemon PID at %s: %d\n",
++              CONFIG_SYSTEM_TELNETD_PID_PATH, ret);
++      return EXIT_FAILURE;
++    }
++
++  if (kill(pid, SIGTERM) < 0)
++    {
++      ret = -errno;
++      if (ret == -ESRCH)
++        {
++          unlink(CONFIG_SYSTEM_TELNETD_PID_PATH);
++        }
++
++      fprintf(stderr, "telnetd: kill(%ld) failed: %d\n", (long)pid, ret);
++      return EXIT_FAILURE;
++    }
++
++  unlink(CONFIG_SYSTEM_TELNETD_PID_PATH);
++  printf("telnetd: stopped pid %ld\n", (long)pid);
++  return EXIT_SUCCESS;
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -67,9 +165,10 @@ int main(int argc, FAR char *argv[])
+   };
+ 
+   int daemon = 1;
++  int stop = 0;
+   int opt;
+ 
+-  while ((opt = getopt(argc, argv, "46cp:")) != ERROR)
++  while ((opt = getopt(argc, argv, "46ckp:")) != ERROR)
+     {
+       switch (opt)
+         {
+@@ -87,15 +186,40 @@ int main(int argc, FAR char *argv[])
+             daemon = 0;
+             break;
+ 
++          case 'k':
++            stop = 1;
++            break;
++
+           case 'p':
+             config.d_port = atoi(optarg);
+             break;
+ 
+           default:
+-            fprintf(stderr, "Usage: %s [-4|-6] [-p port]\n", argv[0]);
++            fprintf(stderr, "Usage: %s [-4|-6] [-c|-k] [-p port]\n",
++                    argv[0]);
+             exit(EXIT_FAILURE);
+         }
+     }
+ 
+-  return daemon ? telnetd_daemon(&config) : nsh_telnetmain(1, argv);
++  if (stop)
++    {
++      return telnetd_stop();
++    }
++
++  if (daemon)
++    {
++      int ret = telnetd_write_pid();
++
++      if (ret < 0)
++        {
++          fprintf(stderr, "telnetd: warning: PID file %s failed: %d\n",
++                  CONFIG_SYSTEM_TELNETD_PID_PATH, ret);
++        }
++
++      ret = telnetd_daemon(&config);
++      unlink(CONFIG_SYSTEM_TELNETD_PID_PATH);
++      return ret;
++    }
++
++  return nsh_telnetmain(1, argv);
+ }

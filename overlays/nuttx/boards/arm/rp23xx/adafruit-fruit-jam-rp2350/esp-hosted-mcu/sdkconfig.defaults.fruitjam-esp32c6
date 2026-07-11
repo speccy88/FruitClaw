@@ -1,0 +1,46 @@
+# Fruit Jam ESP32-C6 ESP-Hosted-MCU slave overlay.
+#
+# Apply on top of upstream esp-hosted-mcu/slave defaults:
+#
+#   sdkconfig.defaults
+#   sdkconfig.defaults.esp32c6
+#   sdkconfig.defaults.fruitjam-esp32c6
+#
+# The RP2350 host-side NuttX driver currently implements ESP-Hosted standard
+# SPI full-duplex framing, so keep this on CONFIG_ESP_SPI_HOST_INTERFACE.
+
+CONFIG_ESP_HOST_DEV_BOARD_NONE=y
+CONFIG_ESP_HOSTED_CP_WIFI=y
+CONFIG_ESP_HOSTED_CP_BT=n
+CONFIG_BT_ENABLED=n
+
+CONFIG_ESP_SPI_HOST_INTERFACE=y
+# CONFIG_ESP_SDIO_HOST_INTERFACE is not set
+# CONFIG_ESP_SPI_HD_HOST_INTERFACE is not set
+# CONFIG_ESP_UART_HOST_INTERFACE is not set
+
+CONFIG_SPI_HSPI=y
+CONFIG_ESP_SPI_PRIV_MODE_3=y
+
+# Adafruit Fruit Jam schematic:
+#   RP2350 GPIO31 MOSI -> ESP32-C6 IO21
+#   RP2350 GPIO28 MISO <- ESP32-C6 IO6 through ESP_MISO buffer
+#   RP2350 GPIO30 SCK  -> ESP32-C6 IO22
+#   RP2350 GPIO46 CS   -> ESP32-C6 IO7
+CONFIG_ESP_SPI_HSPI_GPIO_MOSI=21
+CONFIG_ESP_SPI_HSPI_GPIO_MISO=6
+CONFIG_ESP_SPI_HSPI_GPIO_CLK=22
+CONFIG_ESP_SPI_HSPI_GPIO_CS=7
+
+# ESP_BUSY is C6 IO18 to RP2350 GPIO3. I2S_ESP_IRQ is C6 IO9/BOOT9 to
+# RP2350 GPIO23, so the host must leave it as an input during C6 boot.
+CONFIG_ESP_SPI_GPIO_HANDSHAKE=18
+CONFIG_ESP_SPI_GPIO_DATA_READY=9
+
+# Fruit Jam drives the C6 EN pin through RP2350 GPIO22/PERIPH_RST rather than
+# through a normal ESP32-C6 GPIO.
+CONFIG_ESP_SPI_GPIO_RESET=-1
+
+CONFIG_ESP_SPI_DEASSERT_HS_ON_CS=y
+CONFIG_ESP_SPI_CHECKSUM=y
+CONFIG_WIFI_CMD_BASIC_ONLY=y

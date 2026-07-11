@@ -1,0 +1,58 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+if ARCH_BOARD_RASPBERRYPI_PICO_2_W
+
+config RP23XX_PICO_BOOTSEL_ON_WATCHDOG
+	bool "Enter BOOTSEL after a marked watchdog reset"
+	default n
+	depends on BOARDCTL_RESET
+	---help---
+		Development-only recovery support.  If the RP2350 watchdog resets the
+		board while the NuttX RP2350 development guard magic is present, enter
+		ROM BOOTSEL during the next early boot.  Canonical release profiles
+		must keep this disabled.
+
+config RP23XX_AUTO_BOOTSEL_ON_BOOT
+	bool "Automatically reboot to ROM BOOTSEL during board initialization"
+	default n
+	depends on BOARDCTL_RESET
+	---help---
+		Enable this only for recovery/test images.  When selected, the board
+		immediately reboots itself into the RP2350 ROM BOOTSEL USB loader
+		during board initialization, without waiting for NSH or USB CDC.
+
+menuconfig RP23XX_INFINEON_CYW43439
+	bool "Has Infineon CYW43439 WiFi chip"
+	depends on IEEE80211_INFINEON_CYW43439
+	default y
+
+endif
+
+if RP23XX_INFINEON_CYW43439
+
+config CYW43439_FIRMWARE_BIN_PATH
+	string "Path to Infineon 43439 combined firmware binary"
+	default "${PICO_SDK_PATH}/lib/cyw43-driver/firmware/43439A0-7.95.49.00.combined"
+	---help---
+		Path to a real CYW43439 combined firmware binary containing the
+		padded firmware followed by the CLM blob.
+
+config CYW43439_FIRMWARE_HEADER_PATH
+	string "Path to Infineon 43439 combined firmware header"
+	default "${PICO_SDK_PATH}/lib/cyw43-driver/firmware/w43439A0_7_95_49_00_combined.h"
+	---help---
+		Path to the Pico SDK header form of the same combined firmware blob.
+		The board Makefile can extract this header to a binary image when
+		the binary path above is not present.
+
+config CYW43439_FIRMWARE_LEN
+	int "Infineon 43439 firmware length (bytes)"
+	default 224190
+	---help---
+		This is the length of just the base firmware in the firmware image.
+		It does not include padding nor the appended CLM blob.
+
+endif

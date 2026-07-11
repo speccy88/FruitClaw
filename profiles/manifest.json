@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "project": {
+    "name": "NuttX RP2350",
+    "repository": "https://github.com/speccy88/NuttX-RP2350.git",
+    "release_prefix": "nuttx-rp2350"
+  },
+  "release": {
+    "atomic": true,
+    "artifact_template": "nuttx-rp2350-<tag>-<artifact_slug>.uf2",
+    "atomic_profiles": [
+      "fruit-jam-minimal",
+      "pico-2-w-minimal",
+      "fruit-jam-network",
+      "pico-2-w-network",
+      "fruit-jam-trmnl",
+      "fruit-jam-doom",
+      "fruit-jam-full",
+      "fruit-jam-full-fruitclaw"
+    ]
+  },
+  "profiles": [
+    {
+      "id": "fruit-jam-minimal",
+      "board": "adafruit-fruit-jam-rp2350",
+      "board_variant": "RP2350B",
+      "board_config": "fruit-jam-minimal",
+      "defconfig": "profiles/fruit-jam-minimal/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/fruit-jam-minimal/defconfig",
+      "artifact_slug": "fruit-jam-minimal",
+      "networking": "none",
+      "esp32c6_dependency": false,
+      "validation": {
+        "build": "pending",
+        "hardware": "pending",
+        "notes": [
+          "Derived from the previously working Fruit Jam USB NSH/Berry profile; the reduced profile requires clean-build and board smoke validation."
+        ]
+      },
+      "summary": "USB CDC NSH, Berry, vi, readline/history, Ctrl+C, I2C and normal-reset watchdog."
+    },
+    {
+      "id": "pico-2-w-minimal",
+      "board": "raspberrypi-pico-2-w",
+      "board_variant": "RP2350A",
+      "board_config": "pico-2-w-minimal",
+      "defconfig": "profiles/pico-2-w-minimal/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/raspberrypi-pico-2-w/configs/pico-2-w-minimal/defconfig",
+      "artifact_slug": "pico-2-w-minimal",
+      "networking": "none",
+      "esp32c6_dependency": false,
+      "validation": {
+        "build": "pending",
+        "hardware": "pending",
+        "notes": [
+          "Seeded from the prior Pico 2 W USB console profile; Berry, vi, I2C and watchdog additions require validation."
+        ]
+      },
+      "summary": "USB CDC NSH, Berry, vi, readline/history, Ctrl+C, I2C and normal-reset watchdog; CYW43439 disabled."
+    },
+    {
+      "id": "fruit-jam-network",
+      "board": "adafruit-fruit-jam-rp2350",
+      "board_variant": "RP2350B",
+      "board_config": "fruit-jam-network",
+      "defconfig": "profiles/fruit-jam-network/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/fruit-jam-network/defconfig",
+      "artifact_slug": "fruit-jam-network",
+      "networking": "esp-hosted-mcu",
+      "esp32c6_dependency": true,
+      "validation": {
+        "build": "pending",
+        "hardware": "pending",
+        "notes": [
+          "Requires the pinned ESP32-C6 ESP-Hosted-MCU companion firmware and post-migration wlan0 validation."
+        ]
+      },
+      "summary": "Minimal profile plus ESP-Hosted wlan0, DHCP/DNS, FTP, HTTP, ping, NTP, netcat, telnet, wget and WAPI utilities."
+    },
+    {
+      "id": "pico-2-w-network",
+      "board": "raspberrypi-pico-2-w",
+      "board_variant": "RP2350A",
+      "board_config": "pico-2-w-network",
+      "defconfig": "profiles/pico-2-w-network/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/raspberrypi-pico-2-w/configs/pico-2-w-network/defconfig",
+      "artifact_slug": "pico-2-w-network",
+      "networking": "cyw43439",
+      "esp32c6_dependency": false,
+      "validation": {
+        "build": "pending",
+        "hardware": "pending",
+        "notes": [
+          "CYW43439 GSPI association, DHCP and sustained traffic remain live-hardware validation items; no SSID or passphrase is embedded."
+        ]
+      },
+      "summary": "Minimal profile plus CYW43439 GSPI, DHCP/DNS, FTP, HTTP, ping, NTP, netcat, telnet, wget and WAPI utilities."
+    },
+    {
+      "id": "fruit-jam-trmnl",
+      "board": "adafruit-fruit-jam-rp2350",
+      "board_variant": "RP2350B",
+      "board_config": "fruit-jam-trmnl",
+      "defconfig": "profiles/fruit-jam-trmnl/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/fruit-jam-trmnl/defconfig",
+      "artifact_slug": "fruit-jam-trmnl",
+      "networking": "esp-hosted-mcu",
+      "esp32c6_dependency": true,
+      "validation": {
+        "build": "pending",
+        "hardware": "previously-validated",
+        "notes": [
+          "The source profile previously worked on hardware; the thin-wrapper migration still requires regression validation."
+        ]
+      },
+      "summary": "Autostart TRMNL client with ESP-Hosted, PSRAM, 800x480 Y2 internal DVI scanout and storage fallback."
+    },
+    {
+      "id": "fruit-jam-doom",
+      "board": "adafruit-fruit-jam-rp2350",
+      "board_variant": "RP2350B",
+      "board_config": "fruit-jam-doom",
+      "defconfig": "profiles/fruit-jam-doom/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/fruit-jam-doom/defconfig",
+      "artifact_slug": "fruit-jam-doom",
+      "networking": "none",
+      "esp32c6_dependency": false,
+      "validation": {
+        "build": "pending",
+        "hardware": "partial",
+        "notes": [
+          "NXDoom keyboard input was previously working.",
+          "USB mouse device support and I2S audio are included, but NXDoom mouse mapping and sound backend remain implementation and hardware-validation work."
+        ]
+      },
+      "summary": "Focused NXDoom image with minimum tools, PSRAM, RGB565 DVI, SD /data, USB keyboard/mouse devices and I2S audio devices."
+    },
+    {
+      "id": "fruit-jam-full",
+      "board": "adafruit-fruit-jam-rp2350",
+      "board_variant": "RP2350B",
+      "board_config": "fruit-jam-full",
+      "defconfig": "profiles/fruit-jam-full/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/fruit-jam-full/defconfig",
+      "artifact_slug": "fruit-jam-full",
+      "networking": "esp-hosted-mcu",
+      "esp32c6_dependency": true,
+      "validation": {
+        "build": "pending",
+        "hardware": "previously-validated-components",
+        "notes": [
+          "The constituent Fruit Jam drivers previously worked in broader images; the independent full profile requires matrix regression testing."
+        ]
+      },
+      "summary": "Minimum and network features plus PSRAM, SD, DVI, audio, NeoPixels, IR RC, buttons, I2C/SPI, USB HID/hub/composite/Xbox, LVGL and diagnostics."
+    },
+    {
+      "id": "fruit-jam-full-fruitclaw",
+      "board": "adafruit-fruit-jam-rp2350",
+      "board_variant": "RP2350B",
+      "board_config": "fruit-jam-full-fruitclaw",
+      "defconfig": "profiles/fruit-jam-full-fruitclaw/defconfig",
+      "defconfig_destination": "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/configs/fruit-jam-full-fruitclaw/defconfig",
+      "artifact_slug": "fruit-jam-full-fruitclaw",
+      "networking": "esp-hosted-mcu",
+      "esp32c6_dependency": true,
+      "validation": {
+        "build": "pending",
+        "hardware": "previously-validated-components",
+        "notes": [
+          "FruitClaw owns /dev/watchdog0 through its session guard in this profile; the generic watchdog service is deliberately disabled.",
+          "Autostart and external secret-file paths require post-migration regression testing."
+        ]
+      },
+      "summary": "Exact full hardware baseline plus FruitClaw boot autostart and normal-reset FruitClaw session watchdog."
+    }
+  ]
+}

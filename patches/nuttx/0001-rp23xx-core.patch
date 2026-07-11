@@ -1,0 +1,2103 @@
+diff --git a/arch/arm/src/rp23xx/CMakeLists.txt b/arch/arm/src/rp23xx/CMakeLists.txt
+index b67f08039a..b305881079 100644
+--- a/arch/arm/src/rp23xx/CMakeLists.txt
++++ b/arch/arm/src/rp23xx/CMakeLists.txt
+@@ -64,11 +64,25 @@ if(CONFIG_RP23XX_I2C_SLAVE)
+   list(APPEND SRCS rp23xx_i2c_slave.c)
+ endif()
+ 
++if(CONFIG_RP23XX_PSRAM)
++  list(APPEND SRCS rp23xx_psram.c)
++  list(APPEND SRCS rp23xx_heaps.c)
++endif()
++
+ if(CONFIG_RP23XX_I2S)
+   list(APPEND SRCS rp23xx_i2s.c)
+   list(APPEND SRCS rp23xx_i2s_pio.c)
+ endif()
+ 
++if(CONFIG_RP23XX_HSTX_DVI)
++  list(APPEND SRCS rp23xx_dvi.c)
++endif()
++
++if(CONFIG_RP23XX_PIO_USBHOST)
++  list(APPEND SRCS rp23xx_pio_usbhost.c pio_usb/pio_usb.c
++       pio_usb/pio_usb_host.c pio_usb/usb_crc.c)
++endif()
++
+ if(CONFIG_USBDEV)
+   list(APPEND SRCS rp23xx_usbdev.c)
+ endif()
+diff --git a/arch/arm/src/rp23xx/Kconfig b/arch/arm/src/rp23xx/Kconfig
+index cbeba7bbaa..044d7d77f2 100644
+--- a/arch/arm/src/rp23xx/Kconfig
++++ b/arch/arm/src/rp23xx/Kconfig
+@@ -14,6 +14,27 @@ config RP23XX_DMAC
+ 	default y
+ 	select ARCH_DMA
+ 
++config RP23XX_HSTX_DVI_SCANOUT_PSRAM
++	bool "Allocate HSTX DVI scanout buffers from PSRAM"
++	default n
++	depends on RP23XX_HSTX_DVI
++	depends on RP23XX_PSRAM_HEAP_USER
++	---help---
++		Allocate the double-buffered HSTX DVI scanout frames from the
++		PSRAM-backed user heap instead of the internal kernel heap.  This
++		saves roughly two RGB565 frame buffers of internal SRAM on Fruit Jam
++		at the cost of DMA scanout traffic reading from external PSRAM.
++
++config RP23XX_HSTX_DVI_SINGLE_SCANOUT_INTERNAL
++	bool "Use one internal SRAM HSTX DVI scanout buffer"
++	default n
++	depends on RP23XX_HSTX_DVI
++	---help---
++		Use one internal SRAM scanout frame instead of double-buffered
++		scanout. This is intended for static display profiles such as
++		TRMNL, where /dev/fb0 changes infrequently and stable scanout
++		timing matters more than tear-free animation.
++
+ config RP23XX_SYSTIMER_SYSTICK
+ 	bool "SysTick System Timer"
+ 	default n
+@@ -23,6 +44,70 @@ config RP23XX_SYSTIMER_SYSTICK
+ 	---help---
+ 		Use ARM SysTick.
+ 
++config RP23XX_PSRAM
++	bool "External PSRAM"
++	default n
++	---help---
++		Enable the RP2350 QMI CS1 external PSRAM interface.
++
++if RP23XX_PSRAM
++
++choice
++	prompt "PSRAM heap mode"
++	default RP23XX_PSRAM_HEAP_USER if MM_KERNEL_HEAP
++	default RP23XX_PSRAM_HEAP_SINGLE
++
++config RP23XX_PSRAM_HEAP_SINGLE
++	bool "Add PSRAM to the main heap"
++	depends on MM_REGIONS > 1
++	depends on !MM_KERNEL_HEAP
++	---help---
++		Add PSRAM as an extra region in the default user heap.
++
++config RP23XX_PSRAM_HEAP_USER
++	bool "Use PSRAM as the user heap"
++	depends on MM_KERNEL_HEAP
++	---help---
++		Use internal SRAM for the kernel heap and PSRAM for the default
++		user heap.
++
++config RP23XX_PSRAM_HEAP_SEPARATE
++	bool "Create a separate PSRAM heap"
++	select ARCH_HAVE_EXTRA_HEAPS
++	---help---
++		Create a separately named heap backed by PSRAM.
++
++endchoice
++
++config RP23XX_PSRAM_SIZE
++	int "PSRAM size in bytes"
++	default 8388608
++	---help---
++		Size of the external PSRAM aperture made available to NuttX.
++
++config RP23XX_PSRAM_MAX_SCK_HZ
++	int "Maximum PSRAM SCK frequency"
++	default 63000000
++	---help---
++		Maximum QMI SCK frequency used for PSRAM transfers.
++
++config RP23XX_PSRAM_WAIT_TIMEOUT
++	int "PSRAM QMI wait timeout"
++	default 1000000
++	---help---
++		Maximum poll iterations for QMI direct-mode wait loops during
++		PSRAM setup.
++
++config RP23XX_PSRAM_FALLBACK_KERNEL_HEAPSIZE
++	int "Fallback internal kernel heap size"
++	default 262144
++	depends on RP23XX_PSRAM_HEAP_USER
++	---help---
++		Internal SRAM reserved for the kernel heap if PSRAM detection
++		fails and the board must fall back to an internal user heap.
++
++endif # RP23XX_PSRAM
++
+ #####################################################################
+ #  UART Configuration
+ #####################################################################
+@@ -710,6 +795,307 @@ config RP23XX_I2S_PIO_SM
+ 
+ endif # RP23XX_I2S
+ 
++#####################################################################
++#  PIO USB Host Configuration
++#####################################################################
++
++config RP23XX_PIO_USBHOST
++	bool "PIO USB host controller"
++	depends on USBHOST
++	depends on RP23XX_DMAC
++	select USBHOST_HAVE_ASYNCH
++	---help---
++		Enable a low/full-speed USB host controller implemented with
++		RP23XX PIO and one DMA channel. This is intended for boards such
++		as the Adafruit Fruit Jam that expose a PIO-USB host port.
++
++if RP23XX_PIO_USBHOST
++
++config RP23XX_PIO_USBHOST_AUTOSTART
++	bool "Start PIO USB host during board bring-up"
++	default n
++	---help---
++		Start the PIO USB host controller and USB host waiter from board
++		bring-up. Leave this disabled during bring-up so CDC/NSH can come
++		up first, then start the host explicitly with piousbhost.
++
++config RP23XX_PIO_USBHOST_DP_GPIO
++	int "PIO USB host D+ GPIO"
++	default 1
++	range 0 47
++
++config RP23XX_PIO_USBHOST_DM_GPIO
++	int "PIO USB host D- GPIO"
++	default 2
++	range 0 47
++
++config RP23XX_PIO_USBHOST_VBUS_GPIO
++	int "PIO USB host VBUS enable GPIO"
++	default -1
++	range -1 47
++	---help---
++		Set to -1 if the board does not expose a software-controlled
++		VBUS power switch.
++
++config RP23XX_PIO_USBHOST_VBUS_OFF_MS
++	int "VBUS power-cycle off time"
++	default 100
++	range 0 2000
++	depends on RP23XX_PIO_USBHOST_VBUS_GPIO >= 0
++	---help---
++		Time to hold the host-port VBUS switch off during explicit host
++		start. Some hubs and composite HID devices need a real discharge
++		window before they respond reliably after repeated firmware tests.
++
++config RP23XX_PIO_USBHOST_VBUS_ON_MS
++	int "VBUS power-on settle time"
++	default 250
++	range 0 3000
++	depends on RP23XX_PIO_USBHOST_VBUS_GPIO >= 0
++	---help---
++		Time to wait after enabling VBUS before starting the PIO USB host.
++
++config RP23XX_PIO_USBHOST_PIO
++	int "PIO instance"
++	default 0
++	range 0 2
++
++config RP23XX_PIO_USBHOST_TX_SM
++	int "TX state machine"
++	default 0
++	range 0 3
++
++config RP23XX_PIO_USBHOST_RX_SM
++	int "RX state machine"
++	default 1
++	range 0 3
++
++config RP23XX_PIO_USBHOST_EOP_SM
++	int "EOP state machine"
++	default 2
++	range 0 3
++
++config RP23XX_PIO_USBHOST_DMA_CHANNEL
++	int "Compatibility DMA channel id"
++	default 9
++	range 0 15
++	---help---
++		Pico-PIO-USB stores a DMA channel id in its transport state. The
++		NuttX port allocates a real DMA channel through rp23xx_dmachannel()
++		and uses this value only as the compatibility handle.
++
++config RP23XX_PIO_USBHOST_FRAME_IRQ
++	bool "Run frame pump from the timer interrupt"
++	default n
++	---help---
++		Run Pico-PIO-USB's 1 ms host frame pump directly from the TIMER0
++		alarm ISR. This matches the Pico SDK/TinyUSB host cadence more
++		closely and removes scheduler jitter from SOF and control-transfer
++		timing during Fruit Jam hub bring-up.
++
++config RP23XX_PIO_USBHOST_FRAME_PRIO
++	int "Frame pump thread priority"
++	default 90
++	depends on !RP23XX_PIO_USBHOST_FRAME_IRQ
++	---help---
++		Priority for the thread that runs Pico-PIO-USB's 1 ms host frame
++		pump. Keep this below the CDC/NSH recovery path while bringing up
++		keyboard and mouse enumeration.
++
++config RP23XX_PIO_USBHOST_FRAME_STACKSIZE
++	int "Frame pump thread stack size"
++	default 2048
++	depends on !RP23XX_PIO_USBHOST_FRAME_IRQ
++	---help---
++		Stack size for the PIO USB host frame pump thread.
++
++config RP23XX_PIO_USBHOST_TIMER_ALARM
++	int "TIMER0 alarm used for USB SOF"
++	default 3
++	range 0 3
++
++config RP23XX_PIO_USBHOST_DESCSIZE
++	int "Descriptor buffer size"
++	default 128
++	range 64 512
++
++config RP23XX_PIO_USBHOST_FIRST_ADDRESS
++	int "First USB device address"
++	default 1
++	range 1 127
++	---help---
++		First device address allocated by the PIO USB host root port.
++		Most controllers start at address 1. Some hub-focused bring-up
++		configurations may reserve lower addresses to match a known-good
++		stack while debugging hub enumeration timing.
++
++config RP23XX_PIO_USBHOST_XFER_TIMEOUT_MS
++	int "Synchronous transfer timeout in milliseconds"
++	default 5000
++	range 100 30000
++
++config RP23XX_PIO_USBHOST_ENUM_DELAY_MS
++	int "Root-port settle delay before reset"
++	default 100
++	range 50 1000
++
++config RP23XX_PIO_USBHOST_RESET_MS
++	int "Root-port reset duration"
++	default 20
++	range 10 100
++
++config RP23XX_PIO_USBHOST_POST_RESET_MS
++	int "Root-port post-reset settle delay"
++	default 50
++	range 10 500
++
++config RP23XX_PIO_USBHOST_SETADDR_DELAY_MS
++	int "Post SET_ADDRESS settle delay"
++	default 10
++	range 2 1000
++	---help---
++		Additional delay after the control status stage of SET_ADDRESS.
++		The common USB host enumerator already waits for the USB-specified
++		minimum. The PIO host can need a little extra guard time before the
++		next setup packet is sent to the new address.
++
++config RP23XX_PIO_USBHOST_ENUM_ATTEMPTS
++	int "Root-port enumeration attempts"
++	default 3
++	range 1 8
++	---help---
++		Number of clean root-port reset/enumeration attempts before the
++		PIO USB host reports the root device as failed. Each attempt closes
++		stale PIO endpoint state and re-enumerates from address zero.
++
++config RP23XX_PIO_USBHOST_CTRL_GAP_MS
++	int "Inter-control-transfer gap"
++	default 1
++	range 0 50
++	---help---
++		Small delay after a completed control transfer, and between setup
++		retries. This gives slow hubs and composite HID devices a little
++		breathing room without changing the USB host class logic.
++
++config RP23XX_PIO_USBHOST_CTRL_RETRIES
++	int "Setup-phase control retries"
++	default 2
++	range 0 8
++	---help---
++		Number of extra attempts for control transfers that fail before
++		the SETUP packet is ACKed. The retry is restricted to setup-phase
++		failures so side-effecting requests are not repeated after the
++		device has already accepted them.
++
++endif # RP23XX_PIO_USBHOST
++
++#####################################################################
++#  HSTX DVI Configuration
++#####################################################################
++
++config RP23XX_HSTX_DVI
++	bool "HSTX DVI framebuffer"
++	depends on RP23XX_RP2350B
++	select DRIVERS_VIDEO
++	select FB_UPDATE
++	select VIDEO_FB
++	select RP23XX_DMAC
++	---help---
++		Enable a DVI signal using the RP2350 HSTX block and expose it as
++		/dev/fb0.
++
++if RP23XX_HSTX_DVI
++
++choice RP23XX_HSTX_DVI_FB_PROFILE
++	prompt "HSTX DVI framebuffer profile"
++	default RP23XX_HSTX_DVI_FB_RGB565_320X240
++
++config RP23XX_HSTX_DVI_FB_RGB565_320X240
++	bool "320x240 RGB565, scaled for the current LVGL display path"
++	---help---
++		Expose /dev/fb0 as a 320x240 RGB565 framebuffer. With output
++		scaling set to 2, this fills the normal 640x480 DVI scanout and
++		matches the current Fruit Jam LVGL-friendly profile.
++
++config RP23XX_HSTX_DVI_FB_Y2_800X480
++	bool "800x480 Y2 grayscale, experimental TRMNL-style framebuffer"
++	depends on RP23XX_HSTX_DVI_SCANOUT_PSRAM || RP23XX_HSTX_DVI_SINGLE_SCANOUT_INTERNAL
++	---help---
++		Expose /dev/fb0 as an 800x480 2-bit uncompressed grayscale
++		framebuffer. The app-visible framebuffer is packed Y2, while the
++		driver expands it to compact RGB332 scanout buffers for HSTX DVI
++		output.
++
++		This profile is intended for future TRMNL-style work and is not
++		the LVGL RGB565 profile. It needs PSRAM-backed scanout buffers
++		because the internal scanout frames are still much larger than the
++		packed Y2 app-visible framebuffer.
++
++endchoice # RP23XX_HSTX_DVI_FB_PROFILE
++
++choice RP23XX_HSTX_DVI_Y2_OUTPUT_TIMING
++	prompt "800x480 Y2 DVI output timing"
++	depends on RP23XX_HSTX_DVI_FB_Y2_800X480
++	default RP23XX_HSTX_DVI_Y2_OUTPUT_VGA_640X480
++
++config RP23XX_HSTX_DVI_Y2_OUTPUT_VGA_640X480
++	bool "640x480 VGA timing with downsampled 800x480 Y2 scanout"
++	---help---
++		Keep /dev/fb0 as an 800x480 FB_FMT_Y2 framebuffer, but
++		downsample the expanded scanout horizontally into a 640x480
++		25.2 MHz DVI signal. This is the most compatible mode for
++		ordinary HDMI monitors during TRMNL bring-up.
++
++config RP23XX_HSTX_DVI_Y2_OUTPUT_NATIVE_800X480
++	bool "Native tight 800x480 timing"
++	---help---
++		Keep both /dev/fb0 and the DVI active timing at 800x480.
++		This is the pixel-preserving TRMNL-size timing validated on the
++		Fruit Jam bring-up monitor at 25.2 MHz, with 840x500 total timing.
++
++endchoice # RP23XX_HSTX_DVI_Y2_OUTPUT_TIMING
++
++config RP23XX_HSTX_DVI_OUTPUT_SCALING
++	int "HSTX DVI framebuffer output scaling"
++	depends on RP23XX_HSTX_DVI_FB_RGB565_320X240
++	default 2
++	range 1 2
++	---help---
++		Scale the 320x240 RGB565 framebuffer into the 640x480 active
++		DVI area. 2 fills the active area. 1 centers the framebuffer
++		with black borders and is useful as a low-bandwidth diagnostic.
++
++config RP23XX_HSTX_DVI_PIXEL_CLOCK
++	int "HSTX DVI target pixel clock"
++	default 25200000 if RP23XX_HSTX_DVI_Y2_OUTPUT_NATIVE_800X480
++	default 25200000 if RP23XX_HSTX_DVI_Y2_OUTPUT_VGA_640X480
++	default 25200000
++	range 1 126000000
++	---help---
++		Target pixel clock for the selected DVI profile. The actual pixel
++		clock is BOARD_HSTX_FREQ divided by the nearest integer divider.
++		The default 320x240/RGB565 profile uses 25.2 MHz. The native
++		800x480/Y2 TRMNL profile also uses 25.2 MHz, which divides evenly
++		from the Fruit Jam 126 MHz HSTX clock.
++
++config RP23XX_HSTX_DVI_BLACKOUT
++	bool "HSTX DVI black-only diagnostic scanout"
++	default n
++	---help---
++		Only stream legal black DVI timing over HSTX. The framebuffer device
++		still exists and can be filled, but scanout does not DMA framebuffer
++		pixels. This isolates HSTX timing/control DMA from framebuffer DMA.
++
++config RP23XX_HSTX_DVI_BOOT_AUTOSTART
++	bool "Start HSTX DVI from the board boot script"
++	default n
++	---help---
++		Start the DVI stream during board boot when the board rcS supports it.
++		This is useful for display-focused profiles that should present an
++		HDMI/DVI signal after reset without requiring a serial dvictrl start.
++
++endif # RP23XX_HSTX_DVI
++
+ #####################################################################
+ #  SPISD Configuration
+ #####################################################################
+@@ -734,6 +1120,14 @@ config RP23XX_SPISD_SPI_CH
+ 	---help---
+ 		Select spi channel number to use spi sd card.
+ 
++config RP23XX_SPISD_AUTOMOUNT
++	bool "Auto-mount SPI SD card at /mnt/sd0"
++	default y
++	---help---
++		Mount the SPI SD card during board bring-up. Disable this for
++		profiles that need to defer SD probing until after boot guards and
++		critical services are running.
++
+ endif # SPISD Configuration
+ 
+ #####################################################################
+diff --git a/arch/arm/src/rp23xx/Make.defs b/arch/arm/src/rp23xx/Make.defs
+index 0042124804..3753788e37 100644
+--- a/arch/arm/src/rp23xx/Make.defs
++++ b/arch/arm/src/rp23xx/Make.defs
+@@ -68,11 +68,28 @@ ifeq ($(CONFIG_RP23XX_I2C_SLAVE),y)
+ CHIP_CSRCS += rp23xx_i2c_slave.c
+ endif
+ 
++ifeq ($(CONFIG_RP23XX_PSRAM),y)
++CHIP_CSRCS += rp23xx_psram.c
++CHIP_CSRCS += rp23xx_heaps.c
++endif
++
+ ifeq ($(CONFIG_RP23XX_I2S),y)
+ CHIP_CSRCS += rp23xx_i2s.c
+ CHIP_CSRCS += rp23xx_i2s_pio.c
+ endif
+ 
++ifeq ($(CONFIG_RP23XX_HSTX_DVI),y)
++CHIP_CSRCS += rp23xx_dvi.c
++endif
++
++ifeq ($(CONFIG_RP23XX_PIO_USBHOST),y)
++VPATH += chip/pio_usb
++CHIP_CSRCS += rp23xx_pio_usbhost.c
++CHIP_CSRCS += pio_usb.c
++CHIP_CSRCS += pio_usb_host.c
++CHIP_CSRCS += usb_crc.c
++endif
++
+ ifeq ($(CONFIG_USBDEV),y)
+ CHIP_CSRCS += rp23xx_usbdev.c
+ endif
+diff --git a/arch/arm/src/rp23xx/hardware/rp23xx_hstx_ctrl.h b/arch/arm/src/rp23xx/hardware/rp23xx_hstx_ctrl.h
+index ae27e475d2..0e7857fb61 100644
+--- a/arch/arm/src/rp23xx/hardware/rp23xx_hstx_ctrl.h
++++ b/arch/arm/src/rp23xx/hardware/rp23xx_hstx_ctrl.h
+@@ -59,8 +59,8 @@
+ #define RP23XX_HSTX_CTRL_CSR_EXPAND_EN                      (1 << 1)
+ #define RP23XX_HSTX_CTRL_CSR_EN                             (1 << 0)
+ #define RP23XX_HSTX_CTRL_BIT_MASK                           (0x00031f1f)
+-#define RP23XX_HSTX_CTRL_BIT_CLK_MASK                       (1 << 25)
+-#define RP23XX_HSTX_CTRL_BIT_INV_MASK                       (1 << 24)
++#define RP23XX_HSTX_CTRL_BIT_CLK_MASK                       (1 << 17)
++#define RP23XX_HSTX_CTRL_BIT_INV_MASK                       (1 << 16)
+ #define RP23XX_HSTX_CTRL_BIT_SEL_N_MASK                     (0x00001f00)
+ #define RP23XX_HSTX_CTRL_BIT_SEL_P_MASK                     (0x0000001f)
+ #define RP23XX_HSTX_CTRL_EXPAND_SHIFT_MASK                  (0x1f1f1f1f)
+diff --git a/arch/arm/src/rp23xx/hardware/rp23xx_memorymap.h b/arch/arm/src/rp23xx/hardware/rp23xx_memorymap.h
+index 323d9a185d..c6067f9d72 100644
+--- a/arch/arm/src/rp23xx/hardware/rp23xx_memorymap.h
++++ b/arch/arm/src/rp23xx/hardware/rp23xx_memorymap.h
+@@ -60,6 +60,7 @@
+ #define RP23XX_XOSC_BASE                 0x40048000  /* Controls the crystal oscillator */
+ #define RP23XX_PLL_SYS_BASE              0x40050000
+ #define RP23XX_PLL_USB_BASE              0x40058000
++#define RP23XX_ACCESSCTRL_BASE           0x40060000
+ #define RP23XX_BUSCTRL_BASE              0x40068000  /* Register block for busfabric control signals and performance counters */
+ #define RP23XX_UART0_BASE                0x40070000
+ #define RP23XX_UART1_BASE                0x40078000
+diff --git a/arch/arm/src/rp23xx/hardware/rp23xx_powman.h b/arch/arm/src/rp23xx/hardware/rp23xx_powman.h
+index e694d56d57..bfcdb431fb 100644
+--- a/arch/arm/src/rp23xx/hardware/rp23xx_powman.h
++++ b/arch/arm/src/rp23xx/hardware/rp23xx_powman.h
+@@ -161,7 +161,7 @@
+ 
+ /* Register bit definitions *************************************************/
+ 
+-#define RP23XX_POWMAN_BADPASSWD                         (1 << 0)
++#define RP23XX_POWMAN_BADPASSWD_BITS                    (1 << 0)
+ 
+ #define RP23XX_POWMAN_VREG_CTRL_RST_N                   (1 << 15)
+ #define RP23XX_POWMAN_VREG_CTRL_UNLOCK                  (1 << 13)
+@@ -183,7 +183,7 @@
+ #define RP23XX_POWMAN_VREG_LP_EXIT_VSEL_MASK            0x000001f0
+ #define RP23XX_POWMAN_VREG_LP_EXIT_MODE                 (1 << 2)
+ #define RP23XX_POWMAN_VREG_LP_EXIT_HIZ                  (1 << 1)
+-#define RP23XX_POWMAN_BOD_CTRL                          (1 << 12)
++#define RP23XX_POWMAN_BOD_CTRL_BITS                     (1 << 12)
+ #define RP23XX_POWMAN_BOD_CTRL_ISOLATE                  (1 << 12)
+ 
+ #define RP23XX_POWMAN_BOD_VSEL_MASK                     0x000001f0
+@@ -317,7 +317,7 @@
+ #define RP23XX_POWMAN_PWRUP3_SOURCE_MASK                0x0000003f
+ #define RP23XX_POWMAN_CURRENT_PWRUP_REQ_MASK            0x0000007f
+ #define RP23XX_POWMAN_LAST_SWCORE_PWRUP_MASK            0x0000007f
+-#define RP23XX_POWMAN_DBG_PWRCFG                        (1 << 0)
++#define RP23XX_POWMAN_DBG_PWRCFG_BITS                   (1 << 0)
+ #define RP23XX_POWMAN_DBG_PWRCFG_IGNORE                 (1 << 0)
+ #define RP23XX_POWMAN_BOOTDIS_MASK                      0x00000003
+ #define RP23XX_POWMAN_BOOTDIS_NEXT                      (1 << 1)
+diff --git a/arch/arm/src/rp23xx/hardware/rp23xx_qmi.h b/arch/arm/src/rp23xx/hardware/rp23xx_qmi.h
+index 0030d723a1..a0017cfaba 100644
+--- a/arch/arm/src/rp23xx/hardware/rp23xx_qmi.h
++++ b/arch/arm/src/rp23xx/hardware/rp23xx_qmi.h
+@@ -33,6 +33,8 @@
+  * Pre-processor Definitions
+  ****************************************************************************/
+ 
++#define RP23XX_QMI_BASE                 RP23XX_XIP_QMI_BASE
++
+ /* Register offsets *********************************************************/
+ 
+ #define RP23XX_QMI_DIRECT_CSR_OFFSET    0x00000000
+@@ -93,39 +95,51 @@
+ #define RP23XX_QMI_DIRECT_TX_DWIDTH             (1 << 18) /* Data width. If 0, hardware will transmit the 8 LSBs of the DIRECT_TX DATA field, and return an 8-bit value in the 8 LSBs of DIRECT_RX. If 1, the full 16-bit width is used. 8-bit and 16-bit transfers can be mixed freely */
+ #define RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT       (16)      /* Configure whether this FIFO record is transferred with single/dual/quad interface width (0/1/2). Different widths can be mixed freely */
+ #define RP23XX_QMI_DIRECT_TX_IWIDTH_MASK        (0x3 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
++#define RP23XX_QMI_DIRECT_TX_IWIDTH_SINGLE      (0x0 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
++#define RP23XX_QMI_DIRECT_TX_IWIDTH_DUAL        (0x1 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
++#define RP23XX_QMI_DIRECT_TX_IWIDTH_QUAD        (0x2 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
+ #define RP23XX_QMI_DIRECT_TX_DATA_MASK          (0xffff)  /* Data pushed here will be clocked out falling edges of SCK (or before the very first rising edge of SCK, if this is the first pulse). For each byte clocked out, the interface will simultaneously sample one byte, on rising edges of SCK, and push this to the DIRECT_RX FIFO. For 16-bit data, the least-significant byte is transmitted first. */
+ #define RP23XX_QMI_DIRECT_RX_MASK               (0xffff)  /* With each byte clocked out on the serial interface, one byte will simultaneously be clocked in, and will appear in this FIFO. The serial interface will stall when this FIFO is full, to avoid dropping data. When 16-bit data is pushed into the TX FIFO, the corresponding RX FIFO push will also contain 16 bits of data. The least-significant byte is the first one received. */
+ 
+ #define RP23XX_QMI_TIMING_COOLDOWN_SHIFT        (30)         /* Chip select cooldown period. When a memory transfer finishes, the chip select remains asserted for 64 x COOLDOWN system clock cycles, plus half an SCK clock period (rounded up for odd SCK divisors). After this cooldown expires, the chip select is always deasserted to save power */
+-#define RP23XX_QMI_TIMING_COOLDOWN_MASK         (0x3 << RP23XX_QMI_M0_TIMING_COOLDOWN_SHIFT)
++#define RP23XX_QMI_TIMING_COOLDOWN_MASK         (0x3 << RP23XX_QMI_TIMING_COOLDOWN_SHIFT)
+ #define RP23XX_QMI_TIMING_PAGEBREAK_SHIFT       (28)         /* When page break is enabled, chip select will automatically deassert when crossing certain power-of-2-aligned address boundaries. The next access will always begin a new read/write SPI burst, even if the address of the next access follows in sequence with the last access before the page boundary */
+-#define RP23XX_QMI_TIMING_PAGEBREAK_MASK        (0x3 << RP23XX_QMI_M0_TIMING_PAGEBREAK_SHIFT)
++#define RP23XX_QMI_TIMING_PAGEBREAK_MASK        (0x3 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
++#define RP23XX_QMI_TIMING_PAGEBREAK_NONE        (0x0 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
++#define RP23XX_QMI_TIMING_PAGEBREAK_256         (0x1 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
++#define RP23XX_QMI_TIMING_PAGEBREAK_1024        (0x2 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
++#define RP23XX_QMI_TIMING_PAGEBREAK_4096        (0x3 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
+ #define RP23XX_QMI_TIMING_SELECT_SETUP          (1 << 25)    /* Add up to one additional system clock cycle of setup between chip select assertion and the first rising edge of SCK */
+ #define RP23XX_QMI_TIMING_SELECT_HOLD_SHIFT     (23)         /* Add up to three additional system clock cycles of active hold between the last falling edge of SCK and the deassertion of this window’s chip select */
+-#define RP23XX_QMI_TIMING_SELECT_HOLD_MASK      (0x3 << RP23XX_QMI_M0_TIMING_SELECT_HOLD_SHIFT)
++#define RP23XX_QMI_TIMING_SELECT_HOLD_MASK      (0x3 << RP23XX_QMI_TIMING_SELECT_HOLD_SHIFT)
+ #define RP23XX_QMI_TIMING_MAX_SELECT_SHIFT      (17)         /* Enforce a maximum assertion duration for this window’s chip select, in units of 64 system clock cycles. If 0, the QMI is permitted to keep the chip select asserted indefinitely when servicing sequential memory accesses (see COOLDOWN) */
+-#define RP23XX_QMI_TIMING_MAX_SELECT_MASK       (0x3f << RP23XX_QMI_M0_TIMING_MAX_SELECT_SHIFT)
++#define RP23XX_QMI_TIMING_MAX_SELECT_MASK       (0x3f << RP23XX_QMI_TIMING_MAX_SELECT_SHIFT)
+ #define RP23XX_QMI_TIMING_MIN_DESELECT_SHIFT    (12)         /* After this window’s chip select is deasserted, it remains deasserted for half an SCK cycle (rounded up to an integer number of system clock cycles), plus MIN_DESELECT additional system clock cycles, before the QMI reasserts either chip select pin */
+-#define RP23XX_QMI_TIMING_MIN_DESELECT_MASK     (0x1f << RP23XX_QMI_M0_TIMING_MIN_DESELECT_SHIFT)
++#define RP23XX_QMI_TIMING_MIN_DESELECT_MASK     (0x1f << RP23XX_QMI_TIMING_MIN_DESELECT_SHIFT)
+ #define RP23XX_QMI_TIMING_RXDELAY_SHIFT         (8)          /* Delay the read data sample timing, in units of one half of a system clock cycle. (Not necessarily half of an SCK cycle.) An RXDELAY of 0 means the sample is captured at the SDI input registers simultaneously with the rising edge of SCK launched from the SCK output register */
+-#define RP23XX_QMI_TIMING_RXDELAY_MASK          (0x7 << RP23XX_QMI_M0_TIMING_RXDELAY_SHIFT)
++#define RP23XX_QMI_TIMING_RXDELAY_MASK          (0x7 << RP23XX_QMI_TIMING_RXDELAY_SHIFT)
+ #define RP23XX_QMI_TIMING_CLKDIV_MASK           (0x000000ff) /* Clock divisor. Odd and even divisors are supported. Defines the SCK clock period in units of 1 system clock cycle. Divisors 1..255 are encoded directly, and a divisor of 256 is encoded with a value of CLKDIV=0 */
+ 
+ #define RP23XX_QMI_FMT_DTR                      (1 << 28)    /* Enable double transfer rate (DTR) for read commands: address, suffix and read data phases are active on both edges of SCK. SDO data is launched centre-aligned on each SCK edge, and SDI data is captured on the SCK edge that follows its launch */
+ #define RP23XX_QMI_FMT_DUMMY_LEN_SHIFT          (16)         /* Length of dummy phase between command suffix and data phase, in units of 4 bits. (i.e. 1 cycle for quad width, 2 for dual, 4 for single) */
+-#define RP23XX_QMI_FMT_DUMMY_LEN_MASK           (0x7 << RP23XX_QMI_M0_RFMT_DUMMY_LEN_SHIFT)
++#define RP23XX_QMI_FMT_DUMMY_LEN_MASK           (0x7 << RP23XX_QMI_FMT_DUMMY_LEN_SHIFT)
+ #define RP23XX_QMI_FMT_SUFFIX_LEN_SHIFT         (14)         /* Length of post-address command suffix, in units of 4 bits. (i.e. 1 cycle for quad width, 2 for dual, 4 for single) */
+-#define RP23XX_QMI_FMT_SUFFIX_LEN_MASK          (0x3 << RP23XX_QMI_M0_RFMT_SUFFIX_LEN_SHIFT)
+-#define RP23XX_QMI_FMT_PREFIX_LEN               (1 << 12)    /* Length of command prefix, in units of 8 bits. (i.e. 2 cycles for quad width, 4 for dual, 8 for single) */
++#define RP23XX_QMI_FMT_SUFFIX_LEN_MASK          (0x3 << RP23XX_QMI_FMT_SUFFIX_LEN_SHIFT)
++#define RP23XX_QMI_FMT_PREFIX_LEN_SHIFT         (12)         /* Length of command prefix, in units of 8 bits. (i.e. 2 cycles for quad width, 4 for dual, 8 for single) */
++#define RP23XX_QMI_FMT_PREFIX_LEN               (1 << RP23XX_QMI_FMT_PREFIX_LEN_SHIFT)
+ #define RP23XX_QMI_FMT_DATA_WIDTH_SHIFT         (8)          /* The width used for the data transfer */
+-#define RP23XX_QMI_FMT_DATA_WIDTH_MASK          (0x3 << RP23XX_QMI_M0_RFMT_DATA_WIDTH_SHIFT)
++#define RP23XX_QMI_FMT_DATA_WIDTH_MASK          (0x3 << RP23XX_QMI_FMT_DATA_WIDTH_SHIFT)
+ #define RP23XX_QMI_FMT_DUMMY_WIDTH_SHIFT        (6)          /* The width used for the dummy phase, if any */
+-#define RP23XX_QMI_FMT_DUMMY_WIDTH_MASK         (0x3 << RP23XX_QMI_M0_RFMT_DUMMY_WIDTH_SHIFT)
++#define RP23XX_QMI_FMT_DUMMY_WIDTH_MASK         (0x3 << RP23XX_QMI_FMT_DUMMY_WIDTH_SHIFT)
+ #define RP23XX_QMI_FMT_SUFFIX_WIDTH_SHIFT       (4)          /* The width used for the post-address command suffix, if any */
+-#define RP23XX_QMI_FMT_SUFFIX_WIDTH_MASK        (0x4 << RP23XX_QMI_M0_RFMT_SUFFIX_WIDTH_SHIFT)
++#define RP23XX_QMI_FMT_SUFFIX_WIDTH_MASK        (0x3 << RP23XX_QMI_FMT_SUFFIX_WIDTH_SHIFT)
+ #define RP23XX_QMI_FMT_ADDR_WIDTH_SHIFT         (2)          /* The transfer width used for the address. The address phase always transfers 24 bits in total */
+-#define RP23XX_QMI_FMT_ADDR_WIDTH_MASK          (0x3 << RP23XX_QMI_M0_RFMT_ADDR_WIDTH_SHIFT)
+-#define RP23XX_QMI_FMT_PREFIX_WIDTH_MASK        (0x00000003) /* The transfer width used for the command prefix, if any */
++#define RP23XX_QMI_FMT_ADDR_WIDTH_MASK          (0x3 << RP23XX_QMI_FMT_ADDR_WIDTH_SHIFT)
++#define RP23XX_QMI_FMT_PREFIX_WIDTH_SHIFT       (0)          /* The transfer width used for the command prefix, if any */
++#define RP23XX_QMI_FMT_PREFIX_WIDTH_MASK        (0x3 << RP23XX_QMI_FMT_PREFIX_WIDTH_SHIFT)
++#define RP23XX_QMI_FMT_WIDTH_SINGLE             (0x0)
++#define RP23XX_QMI_FMT_WIDTH_DUAL               (0x1)
++#define RP23XX_QMI_FMT_WIDTH_QUAD               (0x2)
+ 
+ #define RP23XX_QMI_CMD_SUFFIX_SHIFT             (8)          /* The command suffix bits following the address, if Mx_RFMT_SUFFIX_LEN is nonzero */
+ #define RP23XX_QMI_CMD_SUFFIX_MASK              (0xff << RP23XX_QMI_CMD_SUFFIX_SHIFT)
+diff --git a/arch/arm/src/rp23xx/hardware/rp23xx_xip.h b/arch/arm/src/rp23xx/hardware/rp23xx_xip.h
+index 0248f1b2a2..cd9bb851ac 100644
+--- a/arch/arm/src/rp23xx/hardware/rp23xx_xip.h
++++ b/arch/arm/src/rp23xx/hardware/rp23xx_xip.h
+@@ -33,6 +33,8 @@
+  * Pre-processor Definitions
+  ****************************************************************************/
+ 
++#define RP23XX_XIP_BASE                 RP23XX_XIP_CTRL_BASE
++
+ /* Register offsets *********************************************************/
+ 
+ #define RP23XX_XIP_CTRL_OFFSET          0x00000000
+diff --git a/arch/arm/src/rp23xx/rp23xx_clock.c b/arch/arm/src/rp23xx/rp23xx_clock.c
+index e1e4190478..db48ab1b21 100644
+--- a/arch/arm/src/rp23xx/rp23xx_clock.c
++++ b/arch/arm/src/rp23xx/rp23xx_clock.c
+@@ -54,6 +54,7 @@
+ #include "rp23xx_xosc.h"
+ #include "rp23xx_pll.h"
+ #include "hardware/rp23xx_clocks.h"
++#include "hardware/rp23xx_powman.h"
+ #include "hardware/rp23xx_resets.h"
+ #include "hardware/rp23xx_ticks.h"
+ 
+@@ -61,6 +62,28 @@
+  * Pre-processor Definitions
+  ****************************************************************************/
+ 
++#ifndef BOARD_PLL_SYS_REFDIV
++#  define BOARD_PLL_SYS_REFDIV 1
++#endif
++
++#ifndef BOARD_PLL_SYS_VCO_FREQ
++#  define BOARD_PLL_SYS_VCO_FREQ (1500 * MHZ)
++#endif
++
++#ifndef BOARD_PLL_SYS_POSTDIV1
++#  define BOARD_PLL_SYS_POSTDIV1 5
++#endif
++
++#ifndef BOARD_PLL_SYS_POSTDIV2
++#  define BOARD_PLL_SYS_POSTDIV2 2
++#endif
++
++#ifdef BOARD_VREG_VSEL
++#  define RP23XX_POWMAN_PASSWORD_BITS (0x5afe0000)
++#  define RP23XX_POWMAN_VREG_VSEL_SHIFT 4
++#  define RP23XX_VREG_UPDATE_TIMEOUT 1000000
++#endif
++
+ /****************************************************************************
+  * Private Data
+  ****************************************************************************/
+@@ -83,6 +106,38 @@ static inline bool has_glitchless_mux(int clk_index)
+          clk_index == RP23XX_CLOCKS_NDX_REF;
+ }
+ 
++#ifdef BOARD_VREG_VSEL
++static void rp23xx_clock_configure_vreg(void)
++{
++  uint32_t regval;
++  uint32_t timeout;
++
++  setbits_reg32(RP23XX_POWMAN_PASSWORD_BITS |
++                RP23XX_POWMAN_VREG_CTRL_UNLOCK,
++                RP23XX_POWMAN_VREG_CTRL);
++
++  timeout = RP23XX_VREG_UPDATE_TIMEOUT;
++  while ((getreg32(RP23XX_POWMAN_VREG) &
++          RP23XX_POWMAN_VREG_UPDATE_IN_PROGRESS) != 0 &&
++         timeout-- > 0)
++    ;
++
++  regval = getreg32(RP23XX_POWMAN_VREG);
++  regval &= ~RP23XX_POWMAN_VREG_VSEL_MASK;
++  regval |= RP23XX_POWMAN_PASSWORD_BITS |
++            (BOARD_VREG_VSEL << RP23XX_POWMAN_VREG_VSEL_SHIFT);
++  putreg32(regval, RP23XX_POWMAN_VREG);
++
++  timeout = RP23XX_VREG_UPDATE_TIMEOUT;
++  while ((getreg32(RP23XX_POWMAN_VREG) &
++          RP23XX_POWMAN_VREG_UPDATE_IN_PROGRESS) != 0 &&
++         timeout-- > 0)
++    ;
++
++  up_mdelay(10);
++}
++#endif
++
+ #if defined(CONFIG_RP23XX_CLK_GPOUT_ENABLE)
+ static bool rp23xx_clock_configure_gpout(int clk_index,
+                                         uint32_t src,
+@@ -229,10 +284,17 @@ void clocks_init(void)
+   while (getreg32(RP23XX_CLOCKS_CLK_REF_SELECTED) != 1)
+     ;
+ 
+-  /* Configure PLLs
+-   *                   REF     FBDIV VCO     POSTDIV
+-   * PLL SYS: 12 / 1 = 12MHz * 125 = 1500MHz / 5 / 2 = 150MHz
+-   * PLL USB: 12 / 1 = 12MHz * 100 = 1200MHz / 5 / 5 =  48MHz
++#ifdef BOARD_VREG_VSEL
++  rp23xx_clock_configure_vreg();
++#endif
++
++  /* Configure PLLs.
++   *
++   * Boards may override the SYS PLL parameters when an exact peripheral
++   * clock is required. The default remains:
++   *
++   *   PLL SYS: 12 / 1 = 12MHz * 125 = 1500MHz / 5 / 2 = 150MHz
++   *   PLL USB: 12 / 1 = 12MHz * 100 = 1200MHz / 5 / 5 =  48MHz
+    */
+ 
+   setbits_reg32(RP23XX_RESETS_RESET_PLL_SYS | RP23XX_RESETS_RESET_PLL_USB,
+@@ -243,7 +305,9 @@ void clocks_init(void)
+          (RP23XX_RESETS_RESET_PLL_SYS | RP23XX_RESETS_RESET_PLL_USB))
+     ;
+ 
+-  rp23xx_pll_init(RP23XX_PLL_SYS_BASE, 1, 1500 * MHZ, 5, 2);
++  rp23xx_pll_init(RP23XX_PLL_SYS_BASE, BOARD_PLL_SYS_REFDIV,
++                  BOARD_PLL_SYS_VCO_FREQ, BOARD_PLL_SYS_POSTDIV1,
++                  BOARD_PLL_SYS_POSTDIV2);
+   rp23xx_pll_init(RP23XX_PLL_USB_BASE, 1, 1200 * MHZ, 5, 5);
+ 
+   /* Configure clocks */
+diff --git a/arch/arm/src/rp23xx/rp23xx_gpio.c b/arch/arm/src/rp23xx/rp23xx_gpio.c
+index e4764124b2..fc4dd8e860 100644
+--- a/arch/arm/src/rp23xx/rp23xx_gpio.c
++++ b/arch/arm/src/rp23xx/rp23xx_gpio.c
+@@ -72,7 +72,7 @@ static const int g_gpio_function_mapping_spi[2][5] =
+   {
+     8, 12, 24, 28,
+ #ifdef CONFIG_RP23XX_RP2350B
+-    40, 44
++    40, 44,
+ #endif
+     -1
+   },     /* pin numbers assignable to SPI1 */
+@@ -373,7 +373,7 @@ int rp23xx_gpio_irq_attach(uint32_t gpio, uint32_t intrmode,
+     }
+ 
+   DEBUGASSERT(gpio < RP23XX_GPIO_NUM);
+-  DEBUGASSERT(intrmode <= RP23XX_GPIO_INTR_EDGE_HIGH);
++  DEBUGASSERT(intrmode <= RP23XX_GPIO_INTR_EDGE_BOTH);
+ 
+   /* Save handler information */
+ 
+@@ -398,6 +398,7 @@ int rp23xx_gpio_irq_attach(uint32_t gpio, uint32_t intrmode,
+ 
+ void rp23xx_gpio_enable_irq(uint32_t gpio)
+ {
++  uint32_t bits;
+   uint32_t reg;
+ 
+   DEBUGASSERT(gpio < RP23XX_GPIO_NUM);
+@@ -407,8 +408,18 @@ void rp23xx_gpio_enable_irq(uint32_t gpio)
+       /* Set interrupt enable bit */
+ 
+       reg = RP23XX_IO_BANK0_PROC_INTE(gpio, 0);
++      if (g_gpio_irq_modes[gpio] == RP23XX_GPIO_INTR_EDGE_BOTH)
++        {
++          bits = (0x1 << ((gpio % 8) * 4 + RP23XX_GPIO_INTR_EDGE_LOW)) |
++                 (0x1 << ((gpio % 8) * 4 + RP23XX_GPIO_INTR_EDGE_HIGH));
++        }
++      else
++        {
++          bits = 0x1 << ((gpio % 8) * 4 + g_gpio_irq_modes[gpio]);
++        }
++
+       clrbits_reg32(0xf << ((gpio % 8) * 4), reg);
+-      setbits_reg32(0x1 << ((gpio % 8) * 4 + g_gpio_irq_modes[gpio]), reg);
++      setbits_reg32(bits, reg);
+     }
+ }
+ 
+diff --git a/arch/arm/src/rp23xx/rp23xx_gpio.h b/arch/arm/src/rp23xx/rp23xx_gpio.h
+index dc648c3c20..065c57aaf9 100644
+--- a/arch/arm/src/rp23xx/rp23xx_gpio.h
++++ b/arch/arm/src/rp23xx/rp23xx_gpio.h
+@@ -81,6 +81,7 @@
+ #define RP23XX_GPIO_INTR_LEVEL_HIGH 1
+ #define RP23XX_GPIO_INTR_EDGE_LOW   2
+ #define RP23XX_GPIO_INTR_EDGE_HIGH  3
++#define RP23XX_GPIO_INTR_EDGE_BOTH  4
+ 
+ /****************************************************************************
+  * Public Types
+diff --git a/arch/arm/src/rp23xx/rp23xx_heaps.c b/arch/arm/src/rp23xx/rp23xx_heaps.c
+index 725aeac6ad..970076720b 100644
+--- a/arch/arm/src/rp23xx/rp23xx_heaps.c
++++ b/arch/arm/src/rp23xx/rp23xx_heaps.c
+@@ -29,7 +29,10 @@
+ #include <nuttx/kmalloc.h>
+ #include <nuttx/mm/mm.h>
+ 
++#include <stdint.h>
++
+ #include "arm_internal.h"
++#include "rp23xx_psram.h"
+ 
+ #if defined(CONFIG_RP23XX_PSRAM)
+ 
+@@ -37,8 +40,63 @@
+  * Private Data
+  ****************************************************************************/
+ 
+-static void * const psram_start = (void *)0x11000000ul;
+-static const size_t psram_size = 8 * 1024 * 1024;
++static void * const psram_start = (void *)RP23XX_PSRAM_NOCACHE_BASE;
++
++#if defined (CONFIG_RP23XX_PSRAM_HEAP_USER)
++static bool g_psram_user_heap;
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++#if defined (CONFIG_RP23XX_PSRAM_HEAP_USER)
++static uintptr_t rp23xx_internal_heap_end(void)
++{
++#ifdef CONFIG_ARCH_PGPOOL_PBASE
++  return CONFIG_ARCH_PGPOOL_PBASE;
++#else
++  return CONFIG_RAM_END;
++#endif
++}
++
++static uintptr_t rp23xx_heap_align_up(uintptr_t value)
++{
++  return (value + 7) & ~(uintptr_t)7;
++}
++
++static uintptr_t rp23xx_heap_align_down(uintptr_t value)
++{
++  return value & ~(uintptr_t)7;
++}
++
++static size_t rp23xx_fallback_kheap_size(void)
++{
++  uintptr_t start = rp23xx_heap_align_up(g_idle_topstack);
++  uintptr_t end = rp23xx_heap_align_down(rp23xx_internal_heap_end());
++  size_t available = end - start;
++  size_t requested = CONFIG_RP23XX_PSRAM_FALLBACK_KERNEL_HEAPSIZE;
++
++  if (requested >= available)
++    {
++      requested = available / 2;
++    }
++
++  return requested & ~(size_t)7;
++}
++
++static void rp23xx_allocate_internal_fallback_heap(void **heap_start,
++                                                   size_t *heap_size)
++{
++  uintptr_t start = rp23xx_heap_align_up(g_idle_topstack);
++  uintptr_t end = rp23xx_heap_align_down(rp23xx_internal_heap_end());
++  size_t kheap_size = rp23xx_fallback_kheap_size();
++  uintptr_t user_start = start + kheap_size;
++
++  *heap_start = (void *)user_start;
++  *heap_size = end - user_start;
++}
++#endif
+ 
+ /****************************************************************************
+  * Public Functions
+@@ -56,9 +114,11 @@ static struct mm_heap_s *g_psramheap;
+ #if CONFIG_MM_REGIONS > 1
+ void arm_addregion(void)
+ {
++  size_t size = rp23xx_psramconfig();
++
+   /* Add the PSRAM region to main heap */
+ 
+-  kumm_addregion(psram_start, psram_size);
++  kumm_addregion(psram_start, size);
+ }
+ #endif
+ 
+@@ -72,21 +132,35 @@ void arm_addregion(void)
+ 
+ void up_allocate_kheap(void **heap_start, size_t *heap_size)
+ {
+-  *heap_start = (void *)g_idle_topstack;
+-
+-#ifdef CONFIG_ARCH_PGPOOL_PBASE
+-  *heap_size  = CONFIG_ARCH_PGPOOL_PBASE - g_idle_topstack;
+-#else
+-  *heap_size  = CONFIG_RAM_END - g_idle_topstack;
+-#endif
++  *heap_start = (void *)rp23xx_heap_align_up(g_idle_topstack);
++
++  if (!g_psram_user_heap)
++    {
++      *heap_size = rp23xx_fallback_kheap_size();
++    }
++  else
++    {
++      *heap_size = rp23xx_internal_heap_end() - (uintptr_t)*heap_start;
++    }
+ }
+ 
+ /* Use the external PSRAM as the default user heap */
+ 
+ void up_allocate_heap(void **heap_start, size_t *heap_size)
+ {
+-  *heap_start = psram_start;
+-  *heap_size = psram_size;
++  size_t size = rp23xx_psramconfig();
++
++  if (size > 0)
++    {
++      g_psram_user_heap = true;
++      *heap_start = psram_start;
++      *heap_size = size;
++    }
++  else
++    {
++      g_psram_user_heap = false;
++      rp23xx_allocate_internal_fallback_heap(heap_start, heap_size);
++    }
+ }
+ 
+ #elif defined (CONFIG_RP23XX_PSRAM_HEAP_SEPARATE)
+@@ -97,7 +171,9 @@ void up_allocate_heap(void **heap_start, size_t *heap_size)
+ 
+ void up_extraheaps_init(void)
+ {
+-    g_psramheap = mm_initialize("psram", psram_start, psram_size);
++  size_t size = rp23xx_psramconfig();
++
++  g_psramheap = mm_initialize("psram", psram_start, size);
+ }
+ #endif
+ 
+diff --git a/arch/arm/src/rp23xx/rp23xx_i2s.c b/arch/arm/src/rp23xx/rp23xx_i2s.c
+index ce3c241c5b..e6e4fe910e 100644
+--- a/arch/arm/src/rp23xx/rp23xx_i2s.c
++++ b/arch/arm/src/rp23xx/rp23xx_i2s.c
+@@ -41,6 +41,7 @@
+ #include <nuttx/semaphore.h>
+ #include <nuttx/kmalloc.h>
+ #include <nuttx/queue.h>
++#include <nuttx/clock.h>
+ #include <nuttx/wdog.h>
+ #include <nuttx/wqueue.h>
+ #include <nuttx/spi/spi.h>
+@@ -74,6 +75,8 @@
+ #  define CONFIG_RP23XX_I2S_MAXINFLIGHT 16
+ #endif
+ 
++#define RP23XX_I2S_TIMEOUT_MARGIN_MS 1000
++
+ /* Debug ********************************************************************/
+ 
+ /* Check if SSC debug is enabled (non-standard.. no support in
+@@ -92,6 +95,16 @@
+ #  define CONFIG_RP23XX_I2S_DATALEN 16
+ #endif
+ 
++#if CONFIG_RP23XX_I2S_PIO == 0
++#  define RP23XX_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO0
++#elif CONFIG_RP23XX_I2S_PIO == 1
++#  define RP23XX_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO1
++#elif CONFIG_RP23XX_I2S_PIO == 2
++#  define RP23XX_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO2
++#else
++#  error Invalid CONFIG_RP23XX_I2S_PIO
++#endif
++
+ #if CONFIG_RP23XX_I2S_DATALEN == 8
+ #  define RP23XX_I2S_DATAMASK  0
+ #elif CONFIG_RP23XX_I2S_DATALEN == 16
+@@ -118,6 +131,7 @@ struct rp23xx_buffer_s
+   void *arg;                     /* The argument to be returned with the
+                                   * callback */
+   struct ap_buffer_s *apb;       /* The audio buffer */
++  void *dma_buffer;              /* Internal bounce buffer used for DMA */
+   int result;                    /* The result of the transfer */
+ };
+ 
+@@ -143,6 +157,7 @@ struct rp23xx_i2s_s
+   struct i2s_dev_s  dev;            /* Externally visible I2S interface */
+   mutex_t           lock;           /* Assures mutually exclusive access to I2S */
+   bool              initialized;    /* Has I2S interface been initialized */
++  bool              streaming;      /* Is TX streaming currently active */
+   uint8_t           datalen;        /* Data width (8 or 16) */
+ #ifdef CONFIG_DEBUG_FEATURES
+   uint8_t           align;          /* Log2 of data width (0 or 1) */
+@@ -183,6 +198,9 @@ static void     i2s_buf_initialize(struct rp23xx_i2s_s *priv);
+ 
+ static void     i2s_txdma_timeout(wdparm_t arg);
+ static int      i2s_txdma_setup(struct rp23xx_i2s_s *priv);
++static uint32_t i2s_dma_timeout(struct rp23xx_i2s_s *priv,
++                                struct ap_buffer_s *apb,
++                                uint32_t timeout);
+ static void     i2s_tx_worker(void *arg);
+ static void     i2s_tx_schedule(struct rp23xx_i2s_s *priv, int result);
+ static void     i2s_txdma_callback(DMA_HANDLE handle, uint8_t result,
+@@ -302,6 +320,12 @@ static void i2s_buf_free(struct rp23xx_i2s_s *priv,
+ {
+   irqstate_t flags;
+ 
++  if (bfcontainer->dma_buffer != NULL)
++    {
++      kmm_free(bfcontainer->dma_buffer);
++      bfcontainer->dma_buffer = NULL;
++    }
++
+   /* Put the buffer container back on the free list */
+ 
+   flags = enter_critical_section();
+@@ -371,6 +395,8 @@ static void i2s_txdma_timeout(wdparm_t arg)
+   /* Cancel the DMA */
+ 
+   rp23xx_dmastop(priv->tx.dma);
++  priv->streaming = false;
++  rp23xx_i2s_pio_enable(false);
+ 
+   /* Then schedule completion of the transfer to occur on the worker thread.
+    */
+@@ -415,7 +441,7 @@ static int i2s_txdma_setup(struct rp23xx_i2s_s *priv)
+ 
+   /* If there are no pending transfer, then bail returning success */
+ 
+-  if (sq_empty(&priv->tx.pend))
++  if (sq_empty(&priv->tx.pend) || !priv->streaming)
+     {
+       return OK;
+     }
+@@ -433,7 +459,9 @@ static int i2s_txdma_setup(struct rp23xx_i2s_s *priv)
+ 
+   /* Get the transfer information, accounting for any data offset */
+ 
+-  samp   = (uintptr_t)&apb->samp[apb->curbyte];
++  samp   = bfcontainer->dma_buffer != NULL ?
++           (uintptr_t)bfcontainer->dma_buffer :
++           (uintptr_t)&apb->samp[apb->curbyte];
+   nbytes = apb->nbytes - apb->curbyte;
+ #ifdef CONFIG_DEBUG_FEATURES
+   DEBUGASSERT((samp & priv->align) == 0 && (nbytes & priv->align) == 0);
+@@ -481,6 +509,51 @@ static int i2s_txdma_setup(struct rp23xx_i2s_s *priv)
+   return OK;
+ }
+ 
++/****************************************************************************
++ * Name: i2s_dma_timeout
++ *
++ * Description:
++ *   Convert an upper-layer timeout of zero into a bounded DMA timeout.
++ *
++ ****************************************************************************/
++
++static uint32_t i2s_dma_timeout(struct rp23xx_i2s_s *priv,
++                                struct ap_buffer_s *apb,
++                                uint32_t timeout)
++{
++  uint64_t nbytes;
++  uint64_t bytes_per_second;
++  uint64_t timeout_ms;
++
++  if (timeout > 0)
++    {
++      return timeout;
++    }
++
++  if (priv->samplerate == 0 || priv->channels == 0 || priv->datalen == 0)
++    {
++      return MSEC2TICK(RP23XX_I2S_TIMEOUT_MARGIN_MS);
++    }
++
++  nbytes = apb->nbytes - apb->curbyte;
++  bytes_per_second = ((uint64_t)priv->samplerate * priv->channels *
++                      priv->datalen) / 8;
++  if (bytes_per_second == 0)
++    {
++      return MSEC2TICK(RP23XX_I2S_TIMEOUT_MARGIN_MS);
++    }
++
++  timeout_ms = (nbytes * MSEC_PER_SEC + bytes_per_second - 1) /
++               bytes_per_second;
++  timeout_ms += RP23XX_I2S_TIMEOUT_MARGIN_MS;
++  if (timeout_ms > 5000)
++    {
++      timeout_ms = 5000;
++    }
++
++  return MSEC2TICK((uint32_t)timeout_ms);
++}
++
+ /****************************************************************************
+  * Name: i2s_tx_worker
+  *
+@@ -844,6 +917,7 @@ static int rp23xx_i2s_send(struct i2s_dev_s *dev, struct ap_buffer_s *apb,
+ {
+   struct rp23xx_i2s_s *priv = (struct rp23xx_i2s_s *)dev;
+   struct rp23xx_buffer_s *bfcontainer;
++  apb_samp_t nbytes;
+   irqstate_t flags;
+   int ret;
+ 
+@@ -880,20 +954,39 @@ static int rp23xx_i2s_send(struct i2s_dev_s *dev, struct ap_buffer_s *apb,
+ 
+   /* Initialize the buffer container structure */
+ 
++  nbytes = apb->nbytes - apb->curbyte;
+   bfcontainer->callback = (void *)callback;
+-  bfcontainer->timeout  = timeout;
++  bfcontainer->timeout  = i2s_dma_timeout(priv, apb, timeout);
+   bfcontainer->arg      = arg;
+   bfcontainer->apb      = apb;
++  bfcontainer->dma_buffer = NULL;
+   bfcontainer->result   = -EBUSY;
+ 
++  if (nbytes > 0)
++    {
++      bfcontainer->dma_buffer = kmm_malloc(nbytes);
++      if (bfcontainer->dma_buffer == NULL)
++        {
++          ret = -ENOMEM;
++          goto errout_with_ref;
++        }
++
++      memcpy(bfcontainer->dma_buffer, &apb->samp[apb->curbyte], nbytes);
++    }
++
+   /* Add the buffer container to the end of the TX pending queue */
+ 
+   flags = enter_critical_section();
+   sq_addlast((sq_entry_t *)bfcontainer, &priv->tx.pend);
++  ret = i2s_txdma_setup(priv);
+ 
+   leave_critical_section(flags);
+   nxmutex_unlock(&priv->lock);
+-  return OK;
++  return ret;
++
++errout_with_ref:
++  apb_free(apb);
++  nxmutex_unlock(&priv->lock);
+ 
+ errout_with_buf:
+   i2s_buf_free(priv, bfcontainer);
+@@ -966,6 +1059,7 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+                             unsigned long arg)
+ {
+   struct rp23xx_i2s_s *priv = (struct rp23xx_i2s_s *)dev;
++  struct ap_buffer_info_s *bufinfo;
+   struct audio_buf_desc_s *bufdesc;
+   int ret = -ENOTTY;
+ 
+@@ -998,9 +1092,14 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+                 mode = RP23XX_I2S_PIO_8BIT_STEREO;
+            }
+ 
+-          rp23xx_i2s_pio_configure(mode, priv->samplerate);
++          ret = rp23xx_i2s_pio_configure(mode, priv->samplerate);
++          if (ret < 0)
++            {
++              break;
++            }
+ 
+           flags = enter_critical_section();
++          priv->streaming = true;
+           ret = i2s_txdma_setup(priv);
+           leave_critical_section(flags);
+         }
+@@ -1024,7 +1123,9 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+               wd_cancel(&priv->tx.dog);
+             }
+ 
++          priv->streaming = false;
+           rp23xx_dmastop(priv->tx.dma);
++          rp23xx_i2s_pio_enable(false);
+           leave_critical_section(flags);
+ 
+           i2s_cleanup_queues(priv);
+@@ -1048,6 +1149,7 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+           i2sinfo("AUDIOIOC_PAUSE\n");
+ 
+           flags = enter_critical_section();
++          priv->streaming = false;
+           if (priv->tx.timeout > 0)
+             {
+               priv->tx.timeout = wd_gettime(&priv->tx.dog);
+@@ -1073,6 +1175,7 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+           i2sinfo("AUDIOIOC_RESUME\n");
+ 
+           flags = enter_critical_section();
++          priv->streaming = true;
+           if (priv->tx.timeout > 0)
+             {
+               wd_start(&priv->tx.dog, priv->tx.timeout,
+@@ -1080,9 +1183,8 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+             }
+ 
+           rp23xx_i2s_pio_enable(true);
++          ret = i2s_txdma_setup(priv);
+           leave_critical_section(flags);
+-
+-          ret = 0;
+         }
+         break;
+ 
+@@ -1118,6 +1220,22 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+         }
+         break;
+ 
++      /* AUDIOIOC_GETBUFFERINFO - Get preferred buffer sizing
++       *
++       *   ioctl argument: pointer to an ap_buffer_info_s structure
++       */
++
++      case AUDIOIOC_GETBUFFERINFO:
++        {
++          i2sinfo("AUDIOIOC_GETBUFFERINFO\n");
++
++          bufinfo = (struct ap_buffer_info_s *)arg;
++          bufinfo->buffer_size = CONFIG_AUDIO_BUFFER_NUMBYTES;
++          bufinfo->nbuffers = CONFIG_AUDIO_NUM_BUFFERS;
++          ret = OK;
++        }
++        break;
++
+       default:
+         break;
+     }
+@@ -1248,11 +1366,11 @@ static void i2s_configure(struct rp23xx_i2s_s *priv)
+   if (!priv->initialized)
+     {
+       rp23xx_gpio_set_function(CONFIG_RP23XX_I2S_DATA,
+-                               RP23XX_GPIO_FUNC_PIO0);
++                               RP23XX_I2S_GPIO_FUNC);
+       rp23xx_gpio_set_function(CONFIG_RP23XX_I2S_CLOCK,
+-                               RP23XX_GPIO_FUNC_PIO0);
++                               RP23XX_I2S_GPIO_FUNC);
+       rp23xx_gpio_set_function(CONFIG_RP23XX_I2S_CLOCK + 1,
+-                               RP23XX_GPIO_FUNC_PIO0);
++                               RP23XX_I2S_GPIO_FUNC);
+ 
+       priv->initialized = true;
+     }
+diff --git a/arch/arm/src/rp23xx/rp23xx_i2s_pio.c b/arch/arm/src/rp23xx/rp23xx_i2s_pio.c
+index f136e2ce29..c902c630a4 100644
+--- a/arch/arm/src/rp23xx/rp23xx_i2s_pio.c
++++ b/arch/arm/src/rp23xx/rp23xx_i2s_pio.c
+@@ -293,6 +293,7 @@ int rp23xx_i2s_pio_configure(int mode, uint32_t samplerate)
+           rp23xx_pio_sm_set_clkdiv(g_i2s_pio, g_i2s_pio_sm,
+                                    get_clkdiv(mode, samplerate));
+           rp23xx_pio_sm_clkdiv_restart(g_i2s_pio, g_i2s_pio_sm);
++          g_pio_current_samplerate = samplerate;
+           return 0;
+         }
+     }
+@@ -318,6 +319,7 @@ int rp23xx_i2s_pio_configure(int mode, uint32_t samplerate)
+   g_pio_current_offset = rp23xx_pio_add_program(CONFIG_RP23XX_I2S_PIO,
+                           &conf->program);
+   g_pio_current_mode = mode;
++  g_pio_current_samplerate = samplerate;
+ 
+   /* Configure the state machine */
+ 
+diff --git a/arch/arm/src/rp23xx/rp23xx_pio.c b/arch/arm/src/rp23xx/rp23xx_pio.c
+index 20dfd3565a..9274d449dd 100644
+--- a/arch/arm/src/rp23xx/rp23xx_pio.c
++++ b/arch/arm/src/rp23xx/rp23xx_pio.c
+@@ -58,9 +58,9 @@
+ static spinlock_t pio_lock;
+ #endif
+ 
+-static uint8_t claimed;
++static uint8_t claimed[(RP23XX_PIO_NUM * RP23XX_PIO_SM_NUM + 7) / 8];
+ 
+-static uint32_t _used_instruction_space[2];
++static uint32_t _used_instruction_space[RP23XX_PIO_NUM];
+ 
+ /****************************************************************************
+  * Private Functions
+@@ -199,12 +199,12 @@ void rp23xx_pio_sm_claim(uint32_t pio, uint32_t sm)
+ 
+   if (which)
+     {
+-      hw_claim_or_assert(&claimed, RP23XX_PIO_SM_NUM + sm,
+-                         "PIO 1 SM (%d - 4) already claimed");
++      hw_claim_or_assert(claimed, which * RP23XX_PIO_SM_NUM + sm,
++                         "PIO SM already claimed");
+     }
+   else
+     {
+-      hw_claim_or_assert(&claimed, sm,
++      hw_claim_or_assert(claimed, sm,
+                          "PIO 0 SM %d already claimed");
+     }
+ }
+@@ -224,16 +224,16 @@ void rp23xx_pio_sm_unclaim(uint32_t pio, uint32_t sm)
+ {
+   check_sm_param(sm);
+   uint32_t which = rp23xx_pio_get_index(pio);
+-  hw_claim_clear(&claimed, which * RP23XX_PIO_SM_NUM + sm);
++  hw_claim_clear(claimed, which * RP23XX_PIO_SM_NUM + sm);
+ }
+ 
+ int rp23xx_pio_claim_unused_sm(uint32_t pio, bool required)
+ {
+-  /* PIO index is 0 or 1. */
++  /* PIO index is 0, 1, or 2. */
+ 
+   uint32_t which = rp23xx_pio_get_index(pio);
+   uint32_t base = which * RP23XX_PIO_SM_NUM;
+-  int index = hw_claim_unused_from_range((uint8_t *)&claimed, required, base,
++  int index = hw_claim_unused_from_range(claimed, required, base,
+                                       base + RP23XX_PIO_SM_NUM - 1,
+                                       "No PIO state machines are available");
+   return index >= (int)base ? index - (int)base : -1;
+diff --git a/arch/arm/src/rp23xx/rp23xx_pio.h b/arch/arm/src/rp23xx/rp23xx_pio.h
+index 8051efa770..e847c9d2cf 100644
+--- a/arch/arm/src/rp23xx/rp23xx_pio.h
++++ b/arch/arm/src/rp23xx/rp23xx_pio.h
+@@ -49,6 +49,9 @@
+ 
+ #define PIO_INSTRUCTION_COUNT   32u
+ 
++#define RP23XX_PIO_GPIOBASE_0   0u
++#define RP23XX_PIO_GPIOBASE_16  16u
++
+ #define valid_params_if(x, test)    DEBUGASSERT(test)
+ 
+ #define check_sm_param(sm)   valid_params_if(PIO, sm < RP23XX_PIO_SM_NUM)
+@@ -204,7 +207,7 @@ static inline void rp23xx_sm_config_set_in_pins(rp23xx_pio_sm_config *c,
+  *
+  * Input Parameters:
+  *   c - Pointer to the configuration structure to modify
+- *   sideset_base - 0-31 base pin for 'side set'
++ *   sideset_base - 0-31 virtual base pin for 'side set'
+  *
+  * Returned Value:
+  *   None
+@@ -622,7 +625,7 @@ static inline void rp23xx_pio_sm_set_config(uint32_t pio,
+  *   pio - PIO index (0..2)
+  *
+  * Returned Value:
+- *   the PIO instance number (either 0 or 1)
++ *   the PIO instance number (0..2)
+  *
+  ****************************************************************************/
+ 
+@@ -632,6 +635,59 @@ static inline uint32_t rp23xx_pio_get_index(uint32_t pio)
+   return pio;
+ }
+ 
++/****************************************************************************
++ * Name: rp23xx_pio_get_gpio_base
++ *
++ * Description:
++ *   Return the system GPIO mapped to PIO virtual GPIO 0.
++ *
++ ****************************************************************************/
++
++static inline uint32_t rp23xx_pio_get_gpio_base(uint32_t pio)
++{
++  check_pio_param(pio);
++  return getreg32(RP23XX_PIO_GPIOBASE(pio)) & RP23XX_PIO_GPIOBASE_MASK;
++}
++
++/****************************************************************************
++ * Name: rp23xx_pio_set_gpio_base
++ *
++ * Description:
++ *   Set the system GPIO mapped to PIO virtual GPIO 0.  On RP2350 only bases
++ *   0 and 16 are supported.
++ *
++ ****************************************************************************/
++
++static inline void rp23xx_pio_set_gpio_base(uint32_t pio, uint32_t base)
++{
++  check_pio_param(pio);
++  valid_params_if(PIO, base == RP23XX_PIO_GPIOBASE_0 ||
++                       base == RP23XX_PIO_GPIOBASE_16);
++
++  modbits_reg32(base == RP23XX_PIO_GPIOBASE_16 ?
++                RP23XX_PIO_GPIOBASE_MASK : 0,
++                RP23XX_PIO_GPIOBASE_MASK,
++                RP23XX_PIO_GPIOBASE(pio));
++}
++
++/****************************************************************************
++ * Name: rp23xx_pio_gpio_to_pin
++ *
++ * Description:
++ *   Convert a system GPIO number to the currently selected PIO virtual pin.
++ *
++ ****************************************************************************/
++
++static inline uint32_t rp23xx_pio_gpio_to_pin(uint32_t pio, uint32_t gpio)
++{
++  uint32_t base = rp23xx_pio_get_gpio_base(pio);
++
++  valid_params_if(PIO, gpio >= base);
++  valid_params_if(PIO, gpio - base < 32);
++
++  return gpio - base;
++}
++
+ /****************************************************************************
+  * Name: rp23xx_pio_gpio_init
+  *
+@@ -657,7 +713,7 @@ static inline uint32_t rp23xx_pio_get_index(uint32_t pio)
+ static inline void rp23xx_pio_gpio_init(uint32_t pio, uint32_t pin)
+ {
+   check_pio_param(pio);
+-  valid_params_if(PIO, pin < 32);
++  valid_params_if(PIO, pin < RP23XX_GPIO_NUM);
+   rp23xx_gpio_set_function(pin, pio == 0 ? RP23XX_GPIO_FUNC_PIO0 :
+                                 pio == 1 ? RP23XX_GPIO_FUNC_PIO1 :
+                                            RP23XX_GPIO_FUNC_PIO2);
+@@ -688,7 +744,7 @@ static inline uint32_t rp23xx_pio_get_dreq(uint32_t pio, uint32_t sm,
+   check_sm_param(sm);
+   return sm + (is_tx ? 0 : RP23XX_PIO_SM_NUM) +
+               (pio == 0 ? RP23XX_DMA_DREQ_PIO0_TX0 :
+-               pio == 0 ? RP23XX_DMA_DREQ_PIO1_TX0 :
++               pio == 1 ? RP23XX_DMA_DREQ_PIO1_TX0 :
+                           RP23XX_DMA_DREQ_PIO2_TX0);
+ }
+ 
+diff --git a/arch/arm/src/rp23xx/rp23xx_rom.h b/arch/arm/src/rp23xx/rp23xx_rom.h
+index 0b67668cfe..9611f23fe2 100644
+--- a/arch/arm/src/rp23xx/rp23xx_rom.h
++++ b/arch/arm/src/rp23xx/rp23xx_rom.h
+@@ -91,7 +91,7 @@
+ 
+ /* values 0-7 are secure/non-secure */
+ #define REBOOT2_FLAG_REBOOT_TYPE_NORMAL       0x0 /* param0 = diagnostic partition */
+-#define REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL      0x2 /* param0 = gpio_pin_number, param1 = flags */
++#define REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL      0x2 /* param0 = flags, param1 = gpio_pin_number */
+ #define REBOOT2_FLAG_REBOOT_TYPE_RAM_IMAGE    0x3 /* param0 = image_region_base, param1 = image_region_size */
+ #define REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE 0x4 /* param0 = update_base */
+ 
+diff --git a/arch/arm/src/rp23xx/rp23xx_spi.h b/arch/arm/src/rp23xx/rp23xx_spi.h
+index 6a2639df87..e683674906 100644
+--- a/arch/arm/src/rp23xx/rp23xx_spi.h
++++ b/arch/arm/src/rp23xx/rp23xx_spi.h
+@@ -183,11 +183,13 @@ void spi_flush(struct spi_dev_s *dev);
+ #ifdef CONFIG_RP23XX_SPI0
+ int rp23xx_spi0register(struct spi_dev_s *dev,
+                         spi_mediachange_t callback, void *arg);
++int rp23xx_spi0_mediachange(void);
+ #endif
+ 
+ #ifdef CONFIG_RP23XX_SPI1
+ int rp23xx_spi1register(struct spi_dev_s *dev,
+                         spi_mediachange_t callback, void *arg);
++int rp23xx_spi1_mediachange(void);
+ #endif
+ #endif
+ 
+diff --git a/arch/arm/src/rp23xx/rp23xx_usbdev.c b/arch/arm/src/rp23xx/rp23xx_usbdev.c
+index 582f9cd430..f6c7b31547 100644
+--- a/arch/arm/src/rp23xx/rp23xx_usbdev.c
++++ b/arch/arm/src/rp23xx/rp23xx_usbdev.c
+@@ -2103,10 +2103,12 @@ int usbdev_register(struct usbdevclass_driver_s *driver)
+   putreg32(RP23XX_USBCTRL_REGS_MAIN_CTRL_CONTROLLER_EN,
+            RP23XX_USBCTRL_REGS_MAIN_CTRL);
+ 
+-  /* Enable interrupt */
++  /* Enable interrupt.  Preserve PULLUP_EN, which the class driver may set
++   * during CLASS_BIND via DEV_CONNECT().
++   */
+ 
+-  putreg32(RP23XX_USBCTRL_REGS_SIE_CTRL_EP0_INT_1BUF,
+-           RP23XX_USBCTRL_REGS_SIE_CTRL);
++  setbits_reg32(RP23XX_USBCTRL_REGS_SIE_CTRL_EP0_INT_1BUF,
++                RP23XX_USBCTRL_REGS_SIE_CTRL);
+   putreg32(RP23XX_USBCTRL_REGS_INTR_BUFF_STATUS |
+            RP23XX_USBCTRL_REGS_INTR_BUS_RESET |
+            RP23XX_USBCTRL_REGS_INTR_SETUP_REQ,
+diff --git a/arch/arm/src/rp23xx/rp23xx_wdt.c b/arch/arm/src/rp23xx/rp23xx_wdt.c
+index 5d2542aea2..c5e0de4ffa 100644
+--- a/arch/arm/src/rp23xx/rp23xx_wdt.c
++++ b/arch/arm/src/rp23xx/rp23xx_wdt.c
+@@ -44,17 +44,20 @@
+ #include <nuttx/arch.h>
+ #include <nuttx/clock.h>
+ #include <nuttx/timers/watchdog.h>
++#include <arch/board/board.h>
+ 
+ /****************************************************************************
+  * Pre-processor Definitions
+  ****************************************************************************/
+ 
+-#define WD_ENABLE_BITS   (RP23XX_WATCHDOG_CTRL_ENABLE     \
++#define WD_ENABLE_BITS   RP23XX_WATCHDOG_CTRL_ENABLE
++#define WD_CTRL_MASK     (RP23XX_WATCHDOG_CTRL_ENABLE     \
+                         | RP23XX_WATCHDOG_CTRL_PAUSE_DBG0 \
+                         | RP23XX_WATCHDOG_CTRL_PAUSE_DBG1 \
+                         | RP23XX_WATCHDOG_CTRL_PAUSE_JTAG)
+ 
+ #define WDT_MAX_TIMEOUT (0xffffff)  /* 16777215 ~ 16 sec */
++#define WDT_TICK_CYCLES (BOARD_REF_FREQ / 1000000)
+ 
+ /****************************************************************************
+  * Private Types
+@@ -92,6 +95,8 @@ static int  rp23xx_wdt_ioctl      (struct watchdog_lowerhalf_s *lower,
+                                int                          cmd,
+                                unsigned long                arg);
+ 
++static void rp23xx_wdt_start_tick(void);
++
+ /****************************************************************************
+  * Private Data
+  ****************************************************************************/
+@@ -118,6 +123,12 @@ static watchdog_lowerhalf_t g_rp23xx_watchdog_lowerhalf =
+  * Private Functions
+  ****************************************************************************/
+ 
++static void rp23xx_wdt_start_tick(void)
++{
++  putreg32(WDT_TICK_CYCLES, RP23XX_TICKS_WATCHDOG_CYCLES);
++  putreg32(RP23XX_TICKS_WATCHDOG_CTRL_EN, RP23XX_TICKS_WATCHDOG_CTRL);
++}
++
+ /****************************************************************************
+  * Name: rp23xx_wdt_start
+  ****************************************************************************/
+@@ -137,10 +148,11 @@ int rp23xx_wdt_start(struct watchdog_lowerhalf_s *lower)
+ 
+   putreg32(priv->timeout * USEC_PER_MSEC,  RP23XX_WATCHDOG_LOAD);
+ 
++  rp23xx_wdt_start_tick();
+   putreg32(RP23XX_PSM_WDSEL_BITS & ~(RP23XX_PSM_XOSC | RP23XX_PSM_ROSC),
+            RP23XX_PSM_WDSEL);
+ 
+-  modreg32(WD_ENABLE_BITS, WD_ENABLE_BITS, RP23XX_WATCHDOG_CTRL);
++  modreg32(WD_ENABLE_BITS, WD_CTRL_MASK, RP23XX_WATCHDOG_CTRL);
+ 
+   priv->started = true;
+   return OK;
+@@ -271,10 +283,21 @@ int rp23xx_wdt_init(void)
+ {
+   watchdog_lowerhalf_t *lower = &g_rp23xx_watchdog_lowerhalf;
+   int                   ret   = OK;
++  uint32_t              ctrl = getreg32(RP23XX_WATCHDOG_CTRL);
+ 
+-  putreg32(WDT_MAX_TIMEOUT,  RP23XX_WATCHDOG_LOAD);
+-  modreg32(0, RP23XX_WATCHDOG_CTRL_ENABLE, RP23XX_WATCHDOG_CTRL);
+-  lower->timeout = WDT_MAX_TIMEOUT / USEC_PER_MSEC;
++  if ((ctrl & RP23XX_WATCHDOG_CTRL_ENABLE) != 0)
++    {
++      rp23xx_wdt_start_tick();
++      lower->timeout = (ctrl & RP23XX_WATCHDOG_CTRL_TIME_MASK) /
++                       USEC_PER_MSEC;
++      lower->started = true;
++    }
++  else
++    {
++      putreg32(WDT_MAX_TIMEOUT, RP23XX_WATCHDOG_LOAD);
++      lower->timeout = WDT_MAX_TIMEOUT / USEC_PER_MSEC;
++      lower->started = false;
++    }
+ 
+   lower->upper = watchdog_register(CONFIG_WATCHDOG_DEVPATH,
+                                    (struct watchdog_lowerhalf_s *) lower);
+diff --git a/arch/arm/src/rp23xx/rp23xx_ws2812.c b/arch/arm/src/rp23xx/rp23xx_ws2812.c
+index ee4af76ba6..d8e592a7f3 100644
+--- a/arch/arm/src/rp23xx/rp23xx_ws2812.c
++++ b/arch/arm/src/rp23xx/rp23xx_ws2812.c
+@@ -26,6 +26,7 @@
+ 
+ #include <rp23xx_ws2812.h>
+ 
++#include <errno.h>
+ #include <stdlib.h>
+ #include <fcntl.h>
+ #include <string.h>
+@@ -83,6 +84,82 @@ static const struct rp23xx_pio_program pio_program =
+  * Private Functions
+  ****************************************************************************/
+ 
++static bool ws2812_pio_reserved(uint32_t pio)
++{
++#ifdef CONFIG_RP23XX_PIO_USBHOST
++  if (pio == CONFIG_RP23XX_PIO_USBHOST_PIO)
++    {
++      return true;
++    }
++#endif
++
++#ifdef CONFIG_RP23XX_I2S
++  if (pio == CONFIG_RP23XX_I2S_PIO)
++    {
++      return true;
++    }
++#endif
++
++  return false;
++}
++
++static void ws2812_recover_pio_state(struct ws2812_dev_s *dev_data)
++{
++  struct instance *priv = (struct instance *)dev_data->private;
++  rp23xx_pio_sm_config config;
++  uint32_t pio_gpio_base;
++  uint32_t pio_pin;
++  int divisor;
++
++#ifdef CONFIG_RP23XX_RP2350B
++  pio_gpio_base = dev_data->port >= (RP23XX_PIO_GPIOBASE_16 + 16) ?
++                  RP23XX_PIO_GPIOBASE_16 : RP23XX_PIO_GPIOBASE_0;
++#else
++  pio_gpio_base = RP23XX_PIO_GPIOBASE_0;
++#endif
++
++  rp23xx_pio_set_gpio_base(priv->pio, pio_gpio_base);
++  pio_pin = rp23xx_pio_gpio_to_pin(priv->pio, dev_data->port);
++  rp23xx_pio_gpio_init(priv->pio, dev_data->port);
++  rp23xx_pio_sm_set_consecutive_pindirs(priv->pio,
++                                        priv->pio_sm,
++                                        pio_pin,
++                                        1,
++                                        true);
++
++  memset(&config, 1, sizeof(rp23xx_pio_sm_config));
++
++  divisor =   ((uint64_t)BOARD_SYS_FREQ << 8)
++            / (9 * (uint64_t)dev_data->clock);
++
++  rp23xx_sm_config_set_clkdiv_int_frac(&config,
++                                       divisor >> 8,
++                                       divisor & 0xff);
++  rp23xx_sm_config_set_wrap(&config,
++                            priv->pio_location + ws2812_wrap_target,
++                            priv->pio_location + ws2812_wrap);
++  rp23xx_sm_config_set_out_shift(&config,
++                                 false,
++                                 true,
++                                 dev_data->has_white ? 32 : 24);
++  rp23xx_sm_config_set_fifo_join(&config,
++                                 RP23XX_PIO_FIFO_JOIN_TX);
++  rp23xx_sm_config_set_sideset(&config, 1, false, false);
++  rp23xx_sm_config_set_sideset_pins(&config, pio_pin);
++  rp23xx_pio_sm_init(priv->pio,
++                     priv->pio_sm,
++                     priv->pio_location,
++                     &config);
++  rp23xx_pio_sm_set_enabled(priv->pio, priv->pio_sm, true);
++
++  if (priv->power_pin >= 0)
++    {
++      rp23xx_gpio_init(priv->power_pin);
++      rp23xx_gpio_setdir(priv->power_pin, true);
++      rp23xx_gpio_put(priv->power_pin, true);
++    }
++}
++
+ /****************************************************************************
+  * Name: dma_complete
+  *
+@@ -118,23 +195,51 @@ void dma_complete(DMA_HANDLE handle, uint8_t status, void *arg)
+  *
+  ****************************************************************************/
+ 
+-static void update_pixels(struct ws2812_dev_s  *dev_data)
++static int ws2812_put_word_timeout(uint32_t pio, uint32_t sm,
++                                   uint32_t pixel)
+ {
+-  struct instance *priv       = (struct instance *)dev_data->private;
+-  clock_t          time_delta;
+-  DMA_HANDLE       dma_handle = rp23xx_dmachannel();
+-  dma_config_t     dma_config =
++  clock_t start = clock_systime_ticks();
++  clock_t deadline = start + MSEC2TICK(10);
++
++  while (rp23xx_pio_sm_is_tx_fifo_full(pio, sm))
++    {
++      if ((clock_t)(clock_systime_ticks() - deadline) >= 0)
++        {
++          return -ETIMEDOUT;
++        }
++
++      nxsched_usleep(50);
++    }
++
++  rp23xx_pio_sm_put(pio, sm, pixel);
++  return OK;
++}
++
++static int ws2812_wait_empty_timeout(uint32_t pio, uint32_t sm)
++{
++  clock_t start = clock_systime_ticks();
++  clock_t deadline = start + MSEC2TICK(10);
++
++  while (!rp23xx_pio_sm_is_tx_fifo_empty(pio, sm))
+     {
+-      .dreq   = rp23xx_pio_get_dreq(priv->pio, priv->pio_sm, true),
+-      .size   = RP23XX_DMA_SIZE_WORD,
+-      .noincr = false
+-    };
++      if ((clock_t)(clock_systime_ticks() - deadline) >= 0)
++        {
++          return -ETIMEDOUT;
++        }
++
++      nxsched_usleep(50);
++    }
+ 
+-  rp23xx_txdmasetup(dma_handle,
+-                    (uintptr_t) RP23XX_PIO_TXF(priv->pio, priv->pio_sm),
+-                    (uintptr_t) priv->pixels,
+-                    4 * dev_data->nleds,
+-                    dma_config);
++  return OK;
++}
++
++static int update_pixels(struct ws2812_dev_s  *dev_data)
++{
++  struct instance *priv = (struct instance *)dev_data->private;
++  uint32_t        *pixels = (uint32_t *)priv->pixels;
++  clock_t          time_delta;
++  int              i;
++  int              ret;
+ 
+   /* Make sure at least 50us elapsed since last DMA completed. */
+ 
+@@ -146,9 +251,24 @@ static void update_pixels(struct ws2812_dev_s  *dev_data)
+       nxsched_usleep(50 - time_delta);
+     }
+ 
+-  rp23xx_dmastart(dma_handle, dma_complete, dev_data);
++  ws2812_recover_pio_state(dev_data);
++  for (i = 0; i < dev_data->nleds; i++)
++    {
++      ret = ws2812_put_word_timeout(priv->pio, priv->pio_sm, pixels[i]);
++      if (ret < 0)
++        {
++          return ret;
++        }
++    }
++
++  ret = ws2812_wait_empty_timeout(priv->pio, priv->pio_sm);
++  if (ret < 0)
++    {
++      return ret;
++    }
+ 
+-  /* NOTE: we don't post lock here, the dma_complete does that */
++  priv->last_dma = clock_systime_ticks();
++  return OK;
+ }
+ 
+ /****************************************************************************
+@@ -170,9 +290,13 @@ static int my_open(struct file *filep)
+   struct ws2812_dev_s  *dev_data  = inode->i_private;
+   struct instance      *priv      = (struct instance *)dev_data->private;
+   rp23xx_pio_sm_config  config;
++  uint32_t              pio_gpio_base;
++  uint32_t              pio_pin;
+   int                   divisor;
+   int                   ret;
+   irqstate_t            flags;
++  int                   held_i2s_pio = -1;
++  int                   held_i2s_sm = -1;
+ 
+   flags = enter_critical_section();
+ 
+@@ -180,16 +304,26 @@ static int my_open(struct file *filep)
+ 
+   if (priv->pixels != NULL)
+     {
+-      /* We've already been initialized.  Keep on truckin' */
++      /* Reopen can follow shared reset or PIO reconfiguration by another
++       * peripheral.  Reassert the GPIO, FIFO, and state-machine state even
++       * though the character device instance and pixel buffer already exist.
++       */
+ 
+       ledinfo("rp23xx_ws2812 re-open dev: 0x%p\n", dev_data);
+ 
++      ws2812_recover_pio_state(dev_data);
+       ret = OK;
+       goto post_and_return;
+     }
+ 
+   ledinfo("rp23xx_ws2812 open dev: 0x%p\n", dev_data);
+ 
++  if (dev_data->port >= RP23XX_GPIO_NUM)
++    {
++      ret = -EINVAL;
++      goto post_and_return;
++    }
++
+   /* Allocate the pixel buffer */
+ 
+   priv->pixels = kmm_zalloc(4 * dev_data->nleds);
+@@ -208,48 +342,87 @@ static int my_open(struct file *filep)
+ 
+   for (priv->pio = 0; priv->pio < RP23XX_PIO_NUM; ++priv->pio)
+     {
+-      /* Try to claim a state machine */
++      if (ws2812_pio_reserved(priv->pio))
++        {
++          continue;
++        }
++
++      for (; ; )
++        {
++          /* Try to claim a state machine */
++
++          priv->pio_sm = rp23xx_pio_claim_unused_sm(priv->pio, false);
++
++          /* If we did not get one try the next pio block, if any */
+ 
+-      priv->pio_sm = rp23xx_pio_claim_unused_sm(priv->pio, false);
++          if (priv->pio_sm < 0)
++            {
++              break;
++            }
+ 
+-      /* If we did not get one try the next pio block, if any */
++#ifdef CONFIG_RP23XX_I2S
++          if (priv->pio == CONFIG_RP23XX_I2S_PIO &&
++              priv->pio_sm == CONFIG_RP23XX_I2S_PIO_SM)
++            {
++              held_i2s_pio = priv->pio;
++              held_i2s_sm = priv->pio_sm;
++              continue;
++            }
++#endif
+ 
+-      if (priv->pio_sm < 0) continue;
++          /* See if we have space in this block to load our program */
+ 
+-      /* See if we have space in this block to load our program */
++          if (rp23xx_pio_can_add_program(priv->pio, &pio_program))
++            {
++              /* Great! load the program and exit the pio choice loop */
+ 
+-      if (rp23xx_pio_can_add_program(priv->pio, &pio_program))
+-        {
+-          /* Great! load the program and exit the pio choice loop */
++              priv->pio_location = rp23xx_pio_add_program(priv->pio,
++                                                          &pio_program);
+ 
+-          priv->pio_location = rp23xx_pio_add_program(priv->pio,
+-                                                      &pio_program);
++              goto ws2812_pio_claimed;
++            }
+ 
+-          break;
++          /* Oops -- no room at the inn!  Release sm and try another one */
++
++          rp23xx_pio_sm_unclaim(priv->pio, priv->pio_sm);
+         }
++    }
+ 
+-      /* Oops -- no room at the inn!  Release sm and try next pio */
++ws2812_pio_claimed:
+ 
+-      rp23xx_pio_sm_unclaim(priv->pio, priv->pio_sm);
++  if (held_i2s_sm >= 0)
++    {
++      rp23xx_pio_sm_unclaim(held_i2s_pio, held_i2s_sm);
+     }
+ 
+   if (priv->pio >= RP23XX_PIO_NUM)
+     {
+-      kmm_free(priv->pixels);
+-
+       ret = -ENOMEM;
+       goto post_and_return;
+     }
+ 
+   /* ==== configure the pio state machine ==== */
+ 
+-  /* Configure our pin as used by PIO for output */
++  /* GPIO32 and above are reached through PIO's virtual GPIO base. */
++
++#ifdef CONFIG_RP23XX_RP2350B
++  pio_gpio_base = dev_data->port >=
++                  (RP23XX_PIO_GPIOBASE_16 + 16) ?
++                  RP23XX_PIO_GPIOBASE_16 : RP23XX_PIO_GPIOBASE_0;
++#else
++  pio_gpio_base = RP23XX_PIO_GPIOBASE_0;
++#endif
++
++  rp23xx_pio_set_gpio_base(priv->pio, pio_gpio_base);
++  pio_pin = rp23xx_pio_gpio_to_pin(priv->pio, dev_data->port);
++
++  /* Configure our system GPIO as used by PIO for output. */
+ 
+   rp23xx_pio_gpio_init(priv->pio, dev_data->port);
+ 
+   rp23xx_pio_sm_set_consecutive_pindirs(priv->pio,
+                                         priv->pio_sm,
+-                                        dev_data->port,
++                                        pio_pin,
+                                         1,
+                                         true);
+ 
+@@ -294,9 +467,9 @@ static int my_open(struct file *filep)
+ 
+   rp23xx_sm_config_set_sideset(&config, 1, false, false);
+ 
+-  /* Configure our chosen GPIO pin (in "port") as side-set output */
++  /* Configure our chosen virtual pin as side-set output. */
+ 
+-  rp23xx_sm_config_set_sideset_pins(&config, dev_data->port);
++  rp23xx_sm_config_set_sideset_pins(&config, pio_pin);
+ 
+   /* Load the configuration into the state machine. */
+ 
+@@ -321,6 +494,17 @@ static int my_open(struct file *filep)
+   ret = OK;
+ 
+ post_and_return:
++  if (ret != OK)
++    {
++      priv->open_count -= 1;
++
++      if (priv->pixels != NULL)
++        {
++          kmm_free(priv->pixels);
++          priv->pixels = NULL;
++        }
++    }
++
+   leave_critical_section(flags);
+   return ret;
+ }
+@@ -432,11 +616,17 @@ static ssize_t my_write(struct file *filep,
+       filep->f_pos = position;
+     }
+ 
+-  update_pixels(dev_data);
++  if (xfer_index > 0)
++    {
++      int ret = update_pixels(dev_data);
++      if (ret < 0)
++        {
++          nxmutex_unlock(&dev_data->lock);
++          return ret;
++        }
++    }
+ 
+-  /* NOTE: we don't post lock here, so update_pixels must make sure
+-   *       that happens.
+-   */
++  nxmutex_unlock(&dev_data->lock);
+ 
+   return xfer_index;
+ }
+diff --git a/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_hstx_ctrl.h b/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_hstx_ctrl.h
+index 08fbb71fda..0b7d81f2b8 100644
+--- a/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_hstx_ctrl.h
++++ b/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_hstx_ctrl.h
+@@ -59,8 +59,8 @@
+ #define RP23XX_HSTX_CTRL_CSR_EXPAND_EN                      (1 << 1)
+ #define RP23XX_HSTX_CTRL_CSR_EN                             (1 << 0)
+ #define RP23XX_HSTX_CTRL_BIT_MASK                           (0x00031f1f)
+-#define RP23XX_HSTX_CTRL_BIT_CLK_MASK                       (1 << 25)
+-#define RP23XX_HSTX_CTRL_BIT_INV_MASK                       (1 << 24)
++#define RP23XX_HSTX_CTRL_BIT_CLK_MASK                       (1 << 17)
++#define RP23XX_HSTX_CTRL_BIT_INV_MASK                       (1 << 16)
+ #define RP23XX_HSTX_CTRL_BIT_SEL_N_MASK                     (0x00001f00)
+ #define RP23XX_HSTX_CTRL_BIT_SEL_P_MASK                     (0x0000001f)
+ #define RP23XX_HSTX_CTRL_EXPAND_SHIFT_MASK                  (0x1f1f1f1f)
+diff --git a/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_powman.h b/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_powman.h
+index 83eff35245..cd56b20d44 100644
+--- a/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_powman.h
++++ b/arch/risc-v/src/rp23xx-rv/hardware/rp23xx_powman.h
+@@ -161,7 +161,7 @@
+ 
+ /* Register bit definitions *************************************************/
+ 
+-#define RP23XX_POWMAN_BADPASSWD                         (1 << 0)
++#define RP23XX_POWMAN_BADPASSWD_BITS                    (1 << 0)
+ 
+ #define RP23XX_POWMAN_VREG_CTRL_RST_N                   (1 << 15)
+ #define RP23XX_POWMAN_VREG_CTRL_UNLOCK                  (1 << 13)
+@@ -183,7 +183,7 @@
+ #define RP23XX_POWMAN_VREG_LP_EXIT_VSEL_MASK            0x000001f0
+ #define RP23XX_POWMAN_VREG_LP_EXIT_MODE                 (1 << 2)
+ #define RP23XX_POWMAN_VREG_LP_EXIT_HIZ                  (1 << 1)
+-#define RP23XX_POWMAN_BOD_CTRL                          (1 << 12)
++#define RP23XX_POWMAN_BOD_CTRL_BITS                     (1 << 12)
+ #define RP23XX_POWMAN_BOD_CTRL_ISOLATE                  (1 << 12)
+ 
+ #define RP23XX_POWMAN_BOD_VSEL_MASK                     0x000001f0
+@@ -317,7 +317,7 @@
+ #define RP23XX_POWMAN_PWRUP3_SOURCE_MASK                0x0000003f
+ #define RP23XX_POWMAN_CURRENT_PWRUP_REQ_MASK            0x0000007f
+ #define RP23XX_POWMAN_LAST_SWCORE_PWRUP_MASK            0x0000007f
+-#define RP23XX_POWMAN_DBG_PWRCFG                        (1 << 0)
++#define RP23XX_POWMAN_DBG_PWRCFG_BITS                   (1 << 0)
+ #define RP23XX_POWMAN_DBG_PWRCFG_IGNORE                 (1 << 0)
+ #define RP23XX_POWMAN_BOOTDIS_MASK                      0x00000003
+ #define RP23XX_POWMAN_BOOTDIS_NEXT                      (1 << 1)
+diff --git a/arch/risc-v/src/rp23xx-rv/rp23xx_i2s.c b/arch/risc-v/src/rp23xx-rv/rp23xx_i2s.c
+index 149d8cf0b4..5f89e1d8eb 100644
+--- a/arch/risc-v/src/rp23xx-rv/rp23xx_i2s.c
++++ b/arch/risc-v/src/rp23xx-rv/rp23xx_i2s.c
+@@ -92,6 +92,16 @@
+ #  define CONFIG_RP23XX_RV_I2S_DATALEN 16
+ #endif
+ 
++#if CONFIG_RP23XX_RV_I2S_PIO == 0
++#  define RP23XX_RV_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO0
++#elif CONFIG_RP23XX_RV_I2S_PIO == 1
++#  define RP23XX_RV_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO1
++#elif CONFIG_RP23XX_RV_I2S_PIO == 2
++#  define RP23XX_RV_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO2
++#else
++#  error Invalid CONFIG_RP23XX_RV_I2S_PIO
++#endif
++
+ #if CONFIG_RP23XX_RV_I2S_DATALEN == 8
+ #  define RP23XX_RV_I2S_DATAMASK  0
+ #elif CONFIG_RP23XX_RV_I2S_DATALEN == 16
+@@ -966,6 +976,7 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+                             unsigned long arg)
+ {
+   struct rp23xx_i2s_s *priv = (struct rp23xx_i2s_s *)dev;
++  struct ap_buffer_info_s *bufinfo;
+   struct audio_buf_desc_s *bufdesc;
+   int ret = -ENOTTY;
+ 
+@@ -1118,6 +1129,22 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
+         }
+         break;
+ 
++      /* AUDIOIOC_GETBUFFERINFO - Get preferred buffer sizing
++       *
++       *   ioctl argument: pointer to an ap_buffer_info_s structure
++       */
++
++      case AUDIOIOC_GETBUFFERINFO:
++        {
++          i2sinfo("AUDIOIOC_GETBUFFERINFO\n");
++
++          bufinfo = (struct ap_buffer_info_s *)arg;
++          bufinfo->buffer_size = CONFIG_AUDIO_BUFFER_NUMBYTES;
++          bufinfo->nbuffers = CONFIG_AUDIO_NUM_BUFFERS;
++          ret = OK;
++        }
++        break;
++
+       default:
+         break;
+     }
+@@ -1248,11 +1275,11 @@ static void i2s_configure(struct rp23xx_i2s_s *priv)
+   if (!priv->initialized)
+     {
+       rp23xx_gpio_set_function(CONFIG_RP23XX_RV_I2S_DATA,
+-                               RP23XX_GPIO_FUNC_PIO0);
++                               RP23XX_RV_I2S_GPIO_FUNC);
+       rp23xx_gpio_set_function(CONFIG_RP23XX_RV_I2S_CLOCK,
+-                               RP23XX_GPIO_FUNC_PIO0);
++                               RP23XX_RV_I2S_GPIO_FUNC);
+       rp23xx_gpio_set_function(CONFIG_RP23XX_RV_I2S_CLOCK + 1,
+-                               RP23XX_GPIO_FUNC_PIO0);
++                               RP23XX_RV_I2S_GPIO_FUNC);
+ 
+       priv->initialized = true;
+     }
+diff --git a/arch/risc-v/src/rp23xx-rv/rp23xx_rom.h b/arch/risc-v/src/rp23xx-rv/rp23xx_rom.h
+index 1aa48e3644..677d398d93 100644
+--- a/arch/risc-v/src/rp23xx-rv/rp23xx_rom.h
++++ b/arch/risc-v/src/rp23xx-rv/rp23xx_rom.h
+@@ -91,7 +91,7 @@
+ 
+ /* values 0-7 are secure/non-secure */
+ #define REBOOT2_FLAG_REBOOT_TYPE_NORMAL       0x0 /* param0 = diagnostic partition */
+-#define REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL      0x2 /* param0 = gpio_pin_number, param1 = flags */
++#define REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL      0x2 /* param0 = flags, param1 = gpio_pin_number */
+ #define REBOOT2_FLAG_REBOOT_TYPE_RAM_IMAGE    0x3 /* param0 = image_region_base, param1 = image_region_size */
+ #define REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE 0x4 /* param0 = update_base */
+ 

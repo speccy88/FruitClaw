@@ -1,0 +1,10 @@
+############################################################################
+# apps/system/piousbhost/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+############################################################################
+
+ifneq ($(CONFIG_SYSTEM_PIOUSBHOST),)
+CONFIGURED_APPS += $(APPDIR)/system/piousbhost
+endif

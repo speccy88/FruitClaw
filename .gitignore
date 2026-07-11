@@ -1,7 +1,21 @@
 .DS_Store
+.config
+__pycache__/
+*.py[cod]
+
+# All NuttX configuration and compilation happens in isolated staging trees.
+/build/
+/dist/
+/logs/
+/artifacts/
+
+# Local dependency/download caches.
+/.cache/
+/third-party-cache/
+
+# Local migration, comparison, and spike checkouts.
 fruitclaw-wamr-spike/
 build-artifacts/
-.config
 
 # Local comparison checkouts used during bring-up.
 esp-claw/
@@ -14,9 +28,10 @@ fruitclaw_*.out
 fruitclaw_*.err
 fruitclaw_*.pid
 fruitclaw_*latest.meta
+fruitclaw_*.txt
 
-# Preview artifacts are uploaded to GitHub releases. Force-add only the
-# historical artifacts that are intentionally kept in the repository.
-artifacts/*.uf2
-artifacts/*.bin
-artifacts/hstx-probe/
+# Release assets belong to GitHub Releases, never source commits.
+*.uf2
+*.bin
+*.elf
+*.map

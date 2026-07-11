@@ -1,0 +1,61 @@
+name: Validate wrapper
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".gitmodules"
+      - "apps"
+      - "nuttx"
+      - "sources.lock.json"
+      - "patches/**"
+      - "overlays/**"
+      - "profiles/**"
+      - "scripts/**"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/**"
+      - ".gitmodules"
+      - "apps"
+      - "nuttx"
+      - "sources.lock.json"
+      - "patches/**"
+      - "overlays/**"
+      - "profiles/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Validate shell and Python sources
+        run: |
+          set -euo pipefail
+          bash -n scripts/*.sh scripts/lib/*.sh
+          python3 -c 'import ast, glob; [ast.parse(open(path, encoding="utf-8").read(), path) for path in glob.glob("scripts/*.py")]'
+          shellcheck -x scripts/*.sh scripts/lib/*.sh
+
+      - name: Validate locks and profile contracts
+        run: |
+          scripts/bootstrap.sh --check
+          scripts/check-credentials.py
+
+      - name: Apply ordered patch stacks to immutable pins
+        run: scripts/check-patches.sh
+
+      - name: Prove validation leaves the checkout clean
+        run: git status --porcelain=v1 --untracked-files=all | tee /tmp/status && test ! -s /tmp/status

@@ -1,0 +1,59 @@
+config SYSTEM_RP2350WATCHDOG
+	tristate "RP2350 recovery watchdog daemon"
+	default n
+	depends on WATCHDOG && ARCH_CHIP_RP23XX
+	---help---
+		Feed the RP2350 hardware watchdog from a small background task.  A
+		full scheduler or system hang stops the feed and performs a normal
+		chip reset.  BOOTSEL conversion is a separate development-only option.
+
+if SYSTEM_RP2350WATCHDOG
+
+config SYSTEM_RP2350WATCHDOG_PROGNAME
+	string "Program name"
+	default "rp2350watchdog"
+
+config SYSTEM_RP2350WATCHDOG_PRIORITY
+	int "Task priority"
+	default 90
+
+config SYSTEM_RP2350WATCHDOG_STACKSIZE
+	int "Task stack size"
+	default 2048
+
+config SYSTEM_RP2350WATCHDOG_DEVPATH
+	string "Watchdog device path"
+	default "/dev/watchdog0"
+
+config SYSTEM_RP2350WATCHDOG_TIMEOUT_MS
+	int "Hardware timeout in milliseconds"
+	range 1000 16000
+	default 15000
+	---help---
+		The RP23xx watchdog load register limits the hardware window to about
+		16.7 seconds.  Keep this value at or below 16000 milliseconds.
+
+config SYSTEM_RP2350WATCHDOG_PING_MS
+	int "Keepalive period in milliseconds"
+	range 100 15000
+	default 5000
+
+config SYSTEM_RP2350WATCHDOG_BOOTSEL_RECOVERY
+	bool "Convert watchdog reset to BOOTSEL"
+	default n
+	depends on BOARDCTL && BOARDCTL_RESET
+	---help---
+		Development-only recovery switch.  Mark watchdog scratch registers so
+		the board's early recovery path enters ROM BOOTSEL after a hang.
+		Canonical release defconfigs must keep this disabled.
+
+config SYSTEM_RP2350WATCHDOG_DEV_BOOTSEL_MS
+	int "Development maximum uptime before BOOTSEL"
+	range 0 3600000
+	default 0
+	depends on BOARDCTL && BOARDCTL_RESET
+	---help---
+		Development-only backstop.  Zero disables it.  Canonical release
+		defconfigs require zero; --dev-bootsel overrides it to 600000.
+
+endif

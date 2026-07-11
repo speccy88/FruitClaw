@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_SYSTEM_RP2350WATCHDOG),)
+CONFIGURED_APPS += $(APPDIR)/system/rp2350watchdog
+endif

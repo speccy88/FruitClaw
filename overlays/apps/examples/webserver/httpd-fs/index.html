@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FruitClaw</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.min.css">
+  <style>
+    :root {
+      --fc-accent: #2f6f8f;
+      --fc-line: color-mix(in srgb, currentColor 16%, transparent);
+      --fc-soft: color-mix(in srgb, #2f6f8f 10%, transparent);
+    }
+
+    body {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 1rem 1rem 1.5rem;
+    }
+
+    .banner {
+      display: flex;
+      justify-content: space-between;
+      gap: .75rem;
+      align-items: center;
+      flex-wrap: wrap;
+      border: 1px solid var(--fc-line);
+      border-radius: .55rem;
+      margin-bottom: 1.2rem;
+      padding: .75rem .9rem;
+      background: var(--fc-soft);
+    }
+
+    .banner strong {
+      color: var(--fc-accent);
+      font-size: 1.15rem;
+    }
+
+    .banner a {
+      font-weight: 600;
+    }
+
+    .hero {
+      border-bottom: 1px solid var(--fc-line);
+      margin-bottom: 1.2rem;
+      padding-bottom: .4rem;
+    }
+
+    main {
+      min-height: 55vh;
+    }
+
+    main h1:first-child {
+      margin-top: 0;
+    }
+
+    footer {
+      margin-top: 2rem;
+      color: var(--text-muted, #666);
+      font-size: .9rem;
+    }
+  </style>
+</head>
+<body>
+  <header class="banner">
+    <strong>FruitClaw</strong>
+    <span>Adafruit Fruit Jam RP2350 NuttX operator image</span>
+    <a href="/docs/index.html#/home">Open /docs Manual</a>
+  </header>
+
+  <section class="hero" aria-label="Documentation shortcut">
+    <p>
+      This is the editable board home page. The full usage manual, build notes,
+      installed utilities, hardware details, kernel devices, MCP tools, and
+      troubleshooting guide live at <a href="/docs/index.html#/home">/docs</a>.
+    </p>
+  </section>
+
+  <main id="content" aria-live="polite">
+    <p>Loading FruitClaw home...</p>
+  </main>
+
+  <footer>
+    This page is served by the embedded NuttX uIP webserver. Its Markdown
+    content can be updated from FruitClaw or MCP.
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    var content = document.getElementById("content");
+    var fallback = [
+      "# FruitClaw",
+      "",
+      "FruitClaw is running. Use the documentation link above for setup, tools,",
+      "MCP, Telegram, Berry, scheduler, hardware, kernel devices, and recovery notes.",
+      "",
+      "From MCP or Telegram, update this home page with the `web.home.write` tool."
+    ].join("\n");
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, function (ch) {
+        return {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;"
+        }[ch];
+      });
+    }
+
+    function renderMarkdown(text) {
+      if (window.marked && window.DOMPurify) {
+        return DOMPurify.sanitize(marked.parse(text));
+      }
+
+      return "<pre>" + escapeHtml(text) + "</pre>";
+    }
+
+    function show(text) {
+      content.innerHTML = renderMarkdown(text || fallback);
+    }
+
+    fetch("/site/home.md", { cache: "no-cache" })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("home markdown returned HTTP " + response.status);
+        }
+
+        return response.text();
+      })
+      .then(show)
+      .catch(function () {
+        show(fallback);
+      });
+  }());
+  </script>
+</body>
+</html>

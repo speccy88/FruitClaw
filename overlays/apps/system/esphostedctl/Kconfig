@@ -1,0 +1,28 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_ESPHOSTEDCTL
+	tristate "'esphostedctl' command"
+	default n
+	depends on ESP_HOSTED
+	---help---
+		Enable a command that prints ESP-Hosted transport and wlan driver
+		counters.
+
+if SYSTEM_ESPHOSTEDCTL
+
+config SYSTEM_ESPHOSTEDCTL_PROGNAME
+	string "Program name"
+	default "esphostedctl"
+
+config SYSTEM_ESPHOSTEDCTL_PRIORITY
+	int "esphostedctl task priority"
+	default 100
+
+config SYSTEM_ESPHOSTEDCTL_STACKSIZE
+	int "esphostedctl stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+endif

@@ -1,0 +1,120 @@
+diff --git a/drivers/wireless/CMakeLists.txt b/drivers/wireless/CMakeLists.txt
+index b4b9a40f5f..51a62b64e1 100644
+--- a/drivers/wireless/CMakeLists.txt
++++ b/drivers/wireless/CMakeLists.txt
+@@ -36,6 +36,10 @@ if(CONFIG_DRIVERS_WIRELESS)
+     list(APPEND SRCS gs2200m.c)
+   endif()
+ 
++  if(CONFIG_ESP_HOSTED_SPI)
++    list(APPEND SRCS esp_hosted.c)
++  endif()
++
+   if(CONFIG_WL_NRF24L01)
+     list(APPEND SRCS nrf24l01.c)
+   endif()
+diff --git a/drivers/wireless/Kconfig b/drivers/wireless/Kconfig
+index c86b04f2bf..15f51deb35 100644
+--- a/drivers/wireless/Kconfig
++++ b/drivers/wireless/Kconfig
+@@ -101,6 +101,85 @@ config WL_GS2200M_LOGLEVEL
+ 
+ endif
+ 
++menuconfig ESP_HOSTED
++	bool "Espressif ESP-Hosted Wi-Fi coprocessor support"
++	default n
++	depends on NET
++	select SPI
++	select NETDEVICES
++	select DRIVERS_IEEE80211
++	select NETDEV_WIRELESS_IOCTL
++	select NETDEV_WIRELESS_HANDLER
++	---help---
++		Enable support for Espressif ESP-Hosted-MCU style Wi-Fi
++		coprocessors.  This is the raw-frame hosted path, not the
++		Adafruit NINA socket-command firmware path.
++
++if ESP_HOSTED
++
++choice ESP_HOSTED_WORKQUEUE
++	prompt "ESP-Hosted worker queue"
++	default ESP_HOSTED_HPWORK
++	---help---
++		Select the work queue used for ESP-Hosted data-ready bottom-half
++		processing and startup probing.
++
++config ESP_HOSTED_HPWORK
++	bool "High-priority work queue"
++	select SCHED_HPWORK
++	---help---
++		Use the high-priority worker.  This is appropriate when the
++		ESP-Hosted transport is trusted and should run as a conventional
++		driver bottom half.
++
++config ESP_HOSTED_LPWORK
++	bool "Low-priority work queue"
++	select SCHED_LPWORK
++	---help---
++		Use the low-priority worker.  This is useful during board bring-up
++		or on systems where slow coprocessor handshakes must not starve an
++		interactive console.
++
++endchoice
++
++config ESP_HOSTED_SPI
++	bool "ESP-Hosted SPI full-duplex transport"
++	default y
++	depends on SPI
++	select SPI_EXCHANGE
++	---help---
++		Use ESP-Hosted standard SPI full-duplex transport.  This transport
++		uses SPI plus host-controlled reset and co-processor handshake and
++		data-ready GPIOs.
++
++config ESP_HOSTED_WLAN
++	bool "ESP-Hosted wlan netdev"
++	default y
++	depends on ESP_HOSTED_SPI && NETDEVICES
++	---help---
++		Register an IEEE 802.11 wlan netdev once ESP-Hosted transport and
++		control-plane initialization are implemented and verified.
++
++config ESP_HOSTED_SPI_FREQUENCY
++	int "ESP-Hosted SPI frequency"
++	default 5000000
++	depends on ESP_HOSTED_SPI
++	---help---
++		Initial SPI frequency in Hz.  ESP-Hosted recommends starting low
++		for bring-up, then raising the clock after signal integrity and
++		error counters are understood.
++
++config ESP_HOSTED_SPI_MODE
++	int "ESP-Hosted SPI mode"
++	default 3
++	range 1 3
++	depends on ESP_HOSTED_SPI
++	---help---
++		SPI mode used for ESP-Hosted full-duplex transport.  ESP-Hosted
++		slave firmware does not support mode 0.
++
++endif # ESP_HOSTED
++
+ source "drivers/wireless/spirit/Kconfig"
+ 
+ menuconfig DRIVERS_IEEE802154
+diff --git a/drivers/wireless/Make.defs b/drivers/wireless/Make.defs
+index e6456364a4..d6f5939ceb 100644
+--- a/drivers/wireless/Make.defs
++++ b/drivers/wireless/Make.defs
+@@ -57,6 +57,10 @@ ifeq ($(CONFIG_WL_GS2200M),y)
+ CSRCS += gs2200m.c
+ endif
+ 
++ifeq ($(CONFIG_ESP_HOSTED_SPI),y)
++CSRCS += esp_hosted.c
++endif
++
+ ifeq ($(CONFIG_WL_SPIRIT),y)
+ include wireless/spirit/Make.defs
+ endif
