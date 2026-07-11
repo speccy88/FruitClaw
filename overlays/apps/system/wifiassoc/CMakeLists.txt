@@ -1,0 +1,12 @@
+if(CONFIG_SYSTEM_WIFIASSOC)
+  nuttx_add_application(
+    NAME
+    ${CONFIG_SYSTEM_WIFIASSOC_PROGNAME}
+    SRCS
+    wifiassoc_main.c
+    STACKSIZE
+    ${CONFIG_SYSTEM_WIFIASSOC_STACKSIZE}
+    PRIORITY
+    ${CONFIG_SYSTEM_WIFIASSOC_PRIORITY}
+  )
+endif()

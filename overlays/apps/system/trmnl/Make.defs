@@ -1,0 +1,10 @@
+############################################################################
+# apps/system/trmnl/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+############################################################################
+
+ifneq ($(CONFIG_SYSTEM_TRMNL),)
+CONFIGURED_APPS += $(APPDIR)/system/trmnl
+endif

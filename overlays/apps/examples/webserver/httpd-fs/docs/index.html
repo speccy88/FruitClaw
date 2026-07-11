@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FruitClaw Manual</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.min.css">
+  <style>
+    :root {
+      --content-width: 980px;
+      --fc-accent: #2f6f8f;
+      --fc-line: color-mix(in srgb, currentColor 16%, transparent);
+      --fc-soft: color-mix(in srgb, #2f6f8f 10%, transparent);
+    }
+
+    body {
+      max-width: var(--content-width);
+      margin: 0 auto;
+      padding: 1rem 1rem 1.5rem;
+    }
+
+    header {
+      margin: 0 0 1.1rem;
+    }
+
+    .masthead {
+      border: 1px solid var(--fc-line);
+      border-radius: .6rem;
+      background: var(--fc-soft);
+      padding: .9rem 1rem;
+    }
+
+    .topline,
+    .actions {
+      display: flex;
+      gap: .75rem;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    .topline h1 {
+      margin: 0;
+    }
+
+    .tag {
+      margin: .35rem 0 0;
+      color: var(--text-muted, #666);
+      font-size: .95rem;
+    }
+
+    .actions {
+      justify-content: flex-start;
+      margin-top: .7rem;
+    }
+
+    .actions a {
+      font-weight: 600;
+    }
+
+    nav {
+      display: flex;
+      gap: .4rem;
+      flex-wrap: wrap;
+      margin: .8rem 0 1.2rem;
+    }
+
+    nav a {
+      border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+      border-radius: .45rem;
+      padding: .28rem .6rem;
+      text-decoration: none;
+    }
+
+    nav a.active {
+      background: color-mix(in srgb, var(--fc-accent) 16%, transparent);
+      border-color: var(--fc-accent);
+    }
+
+    main {
+      min-height: 55vh;
+    }
+
+    main h1:first-child,
+    main h2:first-child {
+      margin-top: 0;
+    }
+
+    pre {
+      overflow-x: auto;
+    }
+
+    .source-line,
+    footer {
+      color: var(--text-muted, #666);
+      font-size: .9rem;
+    }
+
+    .source-line {
+      margin-top: 1.5rem;
+      padding-top: .8rem;
+      border-top: 1px solid var(--fc-line);
+    }
+
+    @media (max-width: 640px) {
+      body {
+        padding: .75rem;
+      }
+
+      .masthead {
+        padding: .8rem;
+      }
+
+      nav a {
+        flex: 1 1 auto;
+        text-align: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="masthead">
+      <div class="topline">
+        <h1>FruitClaw Manual</h1>
+        <strong>Guarded operator alpha</strong>
+      </div>
+      <p class="tag">
+        Getting started, full usage, installed tools, hardware, kernel devices,
+        build notes, and troubleshooting from the embedded NuttX webserver.
+      </p>
+      <div class="actions" aria-label="Site links">
+        <a href="/">Board Home</a>
+        <a href="/docs/index.html#/quickstart">Getting Started</a>
+        <a href="/docs/index.html#/guide">Complete Guide</a>
+      </div>
+    </div>
+    <nav id="nav" aria-label="Documentation pages"></nav>
+  </header>
+
+  <main id="content" aria-live="polite">
+    <p>Loading docs...</p>
+  </main>
+
+  <p id="source" class="source-line"></p>
+  <footer>
+    Served as static files by the embedded uIP webserver. Markdown is rendered in the browser.
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    var pages = [];
+    var defaultPage = "home";
+    var cache = {};
+    var nav = document.getElementById("nav");
+    var content = document.getElementById("content");
+    var source = document.getElementById("source");
+
+    function cleanSlug(value) {
+      return (value || defaultPage).toLowerCase().replace(/[^a-z0-9-]/g, "");
+    }
+
+    function currentSlug() {
+      return cleanSlug(location.hash.replace(/^#\/?/, "") || defaultPage);
+    }
+
+    function findPage(slug) {
+      for (var i = 0; i < pages.length; i++) {
+        if (pages[i].slug === slug) {
+          return pages[i];
+        }
+      }
+
+      return null;
+    }
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, function (ch) {
+        return {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;"
+        }[ch];
+      });
+    }
+
+    function renderNav(active) {
+      nav.innerHTML = pages.map(function (page) {
+        var cls = page.slug === active ? " class=\"active\"" : "";
+        return "<a" + cls + " href=\"#/" + page.slug + "\">" +
+          escapeHtml(page.title) + "</a>";
+      }).join("");
+    }
+
+    function renderMarkdown(text) {
+      if (window.marked && window.DOMPurify) {
+        return DOMPurify.sanitize(marked.parse(text));
+      }
+
+      return "<pre>" + escapeHtml(text) + "</pre>";
+    }
+
+    function showError(message) {
+      content.innerHTML = "<h2>Documentation Error</h2><p>" +
+        escapeHtml(message) + "</p>";
+      source.textContent = "";
+    }
+
+    function loadText(path) {
+      if (cache[path]) {
+        return Promise.resolve(cache[path]);
+      }
+
+      return fetch(path, { cache: "no-cache" }).then(function (response) {
+        if (!response.ok) {
+          throw new Error(path + " returned HTTP " + response.status);
+        }
+
+        return response.text();
+      }).then(function (text) {
+        cache[path] = text;
+        return text;
+      });
+    }
+
+    function renderPage() {
+      var slug = currentSlug();
+      var page = findPage(slug);
+
+      if (!page) {
+        location.hash = "#/" + defaultPage;
+        return;
+      }
+
+      document.title = page.title + " - FruitClaw Manual";
+      renderNav(page.slug);
+      content.innerHTML = "<p>Loading " + escapeHtml(page.title) + "...</p>";
+      source.textContent = "";
+
+      loadText(page.file).then(function (text) {
+        content.innerHTML = renderMarkdown(text);
+        source.textContent = page.sources && page.sources.length ?
+          "Sources: " + page.sources.join(", ") : "";
+      }).catch(function (error) {
+        showError(error.message || String(error));
+      });
+    }
+
+    fetch("index.json", { cache: "no-cache" })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("index.json returned HTTP " + response.status);
+        }
+
+        return response.json();
+      })
+      .then(function (index) {
+        pages = index.pages || [];
+        defaultPage = index.default || defaultPage;
+
+        if (!location.hash) {
+          location.hash = "#/" + defaultPage;
+        }
+
+        window.addEventListener("hashchange", renderPage);
+        renderPage();
+      })
+      .catch(function (error) {
+        showError(error.message || String(error));
+      });
+  }());
+  </script>
+</body>
+</html>

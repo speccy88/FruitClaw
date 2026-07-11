@@ -1,0 +1,119 @@
+name: Atomic release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  profiles:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]
+          scripts/check-profiles.py --release-tag "$GITHUB_REF_NAME"
+          echo "matrix=$(scripts/check-profiles.py --list)" >> "$GITHUB_OUTPUT"
+
+  reproducible-build:
+    needs: profiles
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.profiles.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Validate source pins and release policies
+        run: scripts/bootstrap.sh --check
+
+      - name: First clean build
+        env:
+          NUTTX_RP2350_VERSION: ${{ github.ref_name }}
+          NUTTX_RP2350_WORK_ROOT: ${{ github.workspace }}/build/repro-pass-1/work
+          NUTTX_RP2350_DIST_DIR: ${{ github.workspace }}/build/repro-pass-1/dist
+        run: scripts/build-profile.sh "${{ matrix.profile }}" --container
+
+      - name: Second clean build
+        env:
+          NUTTX_RP2350_VERSION: ${{ github.ref_name }}
+          NUTTX_RP2350_WORK_ROOT: ${{ github.workspace }}/build/repro-pass-2/work
+          NUTTX_RP2350_DIST_DIR: ${{ github.workspace }}/build/repro-pass-2/dist
+        run: scripts/build-profile.sh "${{ matrix.profile }}" --container
+
+      - name: Require byte-identical UF2 output
+        run: |
+          set -euo pipefail
+          name="nuttx-rp2350-${GITHUB_REF_NAME}-${{ matrix.profile }}.uf2"
+          cmp "build/repro-pass-1/dist/$name" "build/repro-pass-2/dist/$name"
+
+      - name: Prove both builds leave the checkout clean
+        run: git status --porcelain=v1 --untracked-files=all | tee /tmp/status && test ! -s /tmp/status
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.profile }}
+          path: build/repro-pass-1/dist/nuttx-rp2350-${{ github.ref_name }}-${{ matrix.profile }}.uf2
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: reproducible-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/release-input
+          merge-multiple: true
+
+      - name: Package the complete release
+        run: |
+          scripts/bootstrap.sh --with-release-deps
+          scripts/package-release.sh \
+            --tag "$GITHUB_REF_NAME" \
+            --input-dir dist/release-input \
+            --output-dir "dist/release/$GITHUB_REF_NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuttx-rp2350-${{ github.ref_name }}
+          path: dist/release/${{ github.ref_name }}/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish a new GitHub release without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to replace assets" >&2
+            exit 1
+          fi
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            "${prerelease[@]}" \
+            dist/release/"$GITHUB_REF_NAME"/*

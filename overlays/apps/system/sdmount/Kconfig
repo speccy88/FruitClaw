@@ -1,0 +1,47 @@
+############################################################################
+# apps/system/sdmount/Kconfig
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+############################################################################
+
+config SYSTEM_SDMOUNT
+	tristate "SPI SD mount helper"
+	default n
+	depends on RP23XX_SPISD
+	---help---
+		Enable the sdmount command.  On supported RP23xx boards it retries the
+		board SPI SD-card mount helper after boot.
+
+if SYSTEM_SDMOUNT
+
+config SYSTEM_SDMOUNT_PROGNAME
+	string "Program name"
+	default "sdmount"
+
+config SYSTEM_SDMOUNT_PRIORITY
+	int "sdmount task priority"
+	default 100
+
+config SYSTEM_SDMOUNT_STACKSIZE
+	int "sdmount stack size"
+	default 4096
+
+config SYSTEM_SDMOUNT_DEVPATH
+	string "Default SD block device"
+	default "/dev/mmcsd0"
+
+config SYSTEM_SDMOUNT_MOUNTPOINT
+	string "Default SD mount point"
+	default "/mnt/sd0"
+
+config SYSTEM_SDMOUNT_TIMEOUT_SEC
+	int "sdmount recovery timeout in seconds"
+	default 12
+	range 1 60
+	---help---
+		Reset the board if the retry mount helper does not return within this
+		many seconds.  This keeps manual SD recovery attempts from leaving an
+		unattended Fruit Jam stuck with no usable console.
+
+endif

@@ -1,8 +1,6 @@
 [submodule "nuttx"]
 	path = nuttx
 	url = https://github.com/apache/nuttx.git
-	branch = master
 [submodule "apps"]
 	path = apps
 	url = https://github.com/apache/nuttx-apps.git
-	branch = master

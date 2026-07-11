@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "project": {
+    "name": "NuttX RP2350",
+    "repository": "speccy88/NuttX-RP2350",
+    "initial_release": "v0.1.0-rc.1"
+  },
+  "upstreams": {
+    "nuttx": {
+      "url": "https://github.com/apache/nuttx.git",
+      "commit": "f27749b1b7339676bde10ec6852c9a7082fbaee3"
+    },
+    "apps": {
+      "url": "https://github.com/apache/nuttx-apps.git",
+      "commit": "c785d40af7b354a5ee312ad41e174e07875866da"
+    }
+  },
+  "dependencies": {
+    "pico_sdk": {
+      "version": "2.0.0",
+      "url": "https://github.com/raspberrypi/pico-sdk.git",
+      "commit": "efe2103f9b28458a1615ff096054479743ade236",
+      "cyw43_driver_commit": "faf36381bad1f668a30172b6336c9a970966ef4c",
+      "firmware_header_url": "https://raw.githubusercontent.com/georgerobotics/cyw43-driver/faf36381bad1f668a30172b6336c9a970966ef4c/firmware/w43439A0_7_95_49_00_combined.h",
+      "cyw43439_firmware_header_sha256": "120bb63db1c5cf42cd44cf9a057d6f14601038a9413badf5a3b737f6552bc9ea"
+    },
+    "berry": {
+      "version": "4db341475df9e9ad18e6741ef978b4c467690e09",
+      "url": "https://github.com/berry-lang/berry/archive/4db341475df9e9ad18e6741ef978b4c467690e09.zip",
+      "sha256": "6109d0da0b051ddb8af8fb6624350db4c0275a07c28581cc548681b857b979cf"
+    },
+    "esp_hosted_mcu": {
+      "commit": "8f0770d39065c2a9ff6828268709c3502e0d5349",
+      "artifact": "esp32c6-esp-hosted-mcu.bin",
+      "path": "build/deps/esp32c6-esp-hosted-mcu.bin",
+      "url": "https://github.com/speccy88/NuttX-RP2350/releases/download/fruitclaw-esp-hosted-20260629/fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin",
+      "sha256": "1a1b35659dd62f44fa8c91b3e03f3fec80886072d04aeb6f192823eb28921c08"
+    },
+    "nxdoom": {
+      "repository": "https://github.com/linguini1/NXDoom",
+      "source": "pinned nuttx-apps tree plus local RP2350 integration patches"
+    }
+  },
+  "build": {
+    "container_image": "ghcr.io/apache/nuttx/apache-nuttx-ci-linux",
+    "container_digest": "sha256:2002136a4042fabfa00f2b1607b5054df69706af3dbb1556c9860cc08f597818",
+    "container_platform": "linux/amd64",
+    "toolchain": "Arm GNU Toolchain 14.2.Rel1 (arm-none-eabi-gcc 14.2.1 20241119)",
+    "source_date_epoch": 1783388180
+  }
+}

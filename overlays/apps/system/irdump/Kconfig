@@ -1,0 +1,31 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_IRDUMP
+	tristate "'irdump' command"
+	default n
+	depends on DRIVERS_RC
+	---help---
+		Enable a command that prints raw LIRC MODE2 pulse/space samples.
+
+if SYSTEM_IRDUMP
+
+config SYSTEM_IRDUMP_PROGNAME
+	string "Program name"
+	default "irdump"
+
+config SYSTEM_IRDUMP_PRIORITY
+	int "irdump task priority"
+	default 100
+
+config SYSTEM_IRDUMP_STACKSIZE
+	int "irdump stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_IRDUMP_DEVPATH
+	string "LIRC device path"
+	default "/dev/lirc0"
+
+endif

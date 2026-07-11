@@ -1,0 +1,45 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_RTTTL
+	tristate "'rtttl' command"
+	default n
+	depends on AUDIO && AUDIO_FORMAT_PCM && SYSTEM_NXPLAYER
+	select AUDIOUTILS_RTTTL_C
+	---help---
+		Enable an NSH command that plays RTTTL strings through the
+		NuttX audio subsystem.
+
+if SYSTEM_RTTTL
+
+config SYSTEM_RTTTL_PROGNAME
+	string "Program name"
+	default "rtttl"
+
+config SYSTEM_RTTTL_PRIORITY
+	int "rtttl task priority"
+	default 100
+
+config SYSTEM_RTTTL_STACKSIZE
+	int "rtttl stack size"
+	default 8192
+
+config SYSTEM_RTTTL_DEVPATH
+	string "Audio device path"
+	default "/dev/audio/pcm0"
+
+config SYSTEM_RTTTL_TMPDIR
+	string "Temporary raw PCM output directory"
+	default "/tmp"
+
+config SYSTEM_RTTTL_SAMPLERATE
+	int "Generated sample rate"
+	default 8000
+
+config SYSTEM_RTTTL_VOLUME
+	int "Default volume percent"
+	default 35
+
+endif

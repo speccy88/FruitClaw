@@ -1,0 +1,1311 @@
+diff --git a/include/netutils/httpd.h b/include/netutils/httpd.h
+index e9dc61f75..0d1ef6c1d 100644
+--- a/include/netutils/httpd.h
++++ b/include/netutils/httpd.h
+@@ -89,11 +89,25 @@
+ #define HTTPD_MAX_CONTENTLEN  32
+ #define HTTPD_MAX_HEADERLEN   220
+ #define HTTPD_MAX_CHUNKEDLEN  16
++#define HTTPD_MAX_HDR_VALUE   96
++
++#ifndef CONFIG_NETUTILS_HTTPD_MAX_BODY
++#  define CONFIG_NETUTILS_HTTPD_MAX_BODY 4096
++#endif
+ 
+ /****************************************************************************
+  * Public types
+  ****************************************************************************/
+ 
++enum httpd_method_e
++{
++  HTTPD_METHOD_GET = 0,
++  HTTPD_METHOD_POST,
++  HTTPD_METHOD_DELETE,
++  HTTPD_METHOD_OPTIONS,
++  HTTPD_METHOD_UNSUPPORTED
++};
++
+ struct httpd_fs_file
+ {
+   FAR char *data;
+@@ -111,6 +125,17 @@ struct httpd_state
+ {
+   char ht_buffer[HTTPD_IOBUFFER_SIZE];  /* recv() buffer */
+   char ht_filename[HTTPD_MAX_FILENAME]; /* filename from GET command */
++  enum httpd_method_e ht_method;         /* Parsed request method */
++  int ht_content_length;                 /* Parsed Content-Length */
++  bool ht_content_length_present;        /* True: Content-Length received */
++  FAR char *ht_body;                     /* Heap request body, NUL-terminated */
++  int ht_bodylen;                        /* Request body length */
++  char ht_content_type[HTTPD_MAX_HDR_VALUE];
++  char ht_accept[HTTPD_MAX_HDR_VALUE];
++  char ht_origin[HTTPD_MAX_HDR_VALUE];
++  char ht_authorization[HTTPD_MAX_HDR_VALUE];
++  char ht_mcp_protocol_version[HTTPD_MAX_HDR_VALUE];
++  char ht_mcp_session_id[HTTPD_MAX_HDR_VALUE];
+ #ifndef CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE
+   bool ht_keepalive;                    /* Connection: keep-alive */
+ #endif
+@@ -192,6 +217,18 @@ EXTERN const int g_httpd_numfiles;
+  * Public Function Prototypes
+  ****************************************************************************/
+ 
++/****************************************************************************
++ * Name: httpd_activity_hook
++ *
++ * Description:
++ *   Optional weak hook called while the tiny HTTP server is receiving,
++ *   sending, or closing a request.  Board/application supervisors can
++ *   override this to feed a watchdog while slow TCP peers are being handled.
++ *
++ ****************************************************************************/
++
++void httpd_activity_hook(FAR const char *phase);
++
+ /****************************************************************************
+  * Name: httpd_init
+  *
+@@ -265,6 +302,21 @@ int httpd_send_datachunk(int sockfd, FAR void *data, int len, bool chunked);
+ 
+ int httpd_send_headers(FAR struct httpd_state *pstate, int status, int len);
+ 
++/****************************************************************************
++ * Name: httpd_send_response
++ *
++ * Description:
++ *   Sends a complete HTTP response with explicit content type, optional extra
++ *   headers, and optional body.  URL/CGI path handlers can use this for JSON
++ *   or other dynamic responses without fabricating an httpd_fs_file.
++ *
++ ****************************************************************************/
++
++int httpd_send_response(FAR struct httpd_state *pstate, int status,
++                        FAR const char *content_type,
++                        FAR const char *extra_headers,
++                        FAR const char *body, int body_len);
++
+ #ifdef CONFIG_NETUTILS_HTTPDFSSTATS
+ uint16_t httpd_fs_count(FAR char *name);
+ #endif
+diff --git a/include/netutils/netlib.h b/include/netutils/netlib.h
+index d76c93e96..e77f15f2b 100644
+--- a/include/netutils/netlib.h
++++ b/include/netutils/netlib.h
+@@ -524,6 +524,7 @@ int netlib_parseurl(FAR const char *str, FAR struct url_s *url);
+ 
+ /* Generic server logic */
+ 
++void netlib_server_activity_hook(FAR const char *phase, uint16_t portno);
+ int netlib_listenon(uint16_t portno);
+ void netlib_server(uint16_t portno, pthread_startroutine_t handler,
+                    int stacksize);
+diff --git a/netutils/ftpd/ftpd.c b/netutils/ftpd/ftpd.c
+index c62d9ca73..2761d213f 100644
+--- a/netutils/ftpd/ftpd.c
++++ b/netutils/ftpd/ftpd.c
+@@ -59,6 +59,7 @@
+ #include <assert.h>
+ #include <errno.h>
+ #include <nuttx/debug.h>
++#include <nuttx/compiler.h>
+ 
+ #include <arpa/inet.h>
+ 
+@@ -192,6 +193,15 @@ static void ftpd_freesession(FAR struct ftpd_session_s *session);
+ static void ftpd_workersetup(FAR struct ftpd_session_s *session);
+ static FAR void *ftpd_worker(FAR void *arg);
+ 
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++void weak_function ftpd_activity_hook(FAR const char *phase)
++{
++  (void)phase;
++}
++
+ /****************************************************************************
+  * Private Data
+  ****************************************************************************/
+@@ -825,6 +835,7 @@ static FAR char *ftpd_strtok_alloc(bool skipspace,
+ static int ftpd_rxpoll(int sd, int timeout)
+ {
+   struct pollfd fds[1];
++  int remaining;
+   int ret;
+ 
+   /* Set up the poll */
+@@ -833,9 +844,28 @@ static int ftpd_rxpoll(int sd, int timeout)
+   fds[0].events  = POLLIN;
+   fds[0].revents = 0;
+ 
+-  /* Perform the poll. */
++  /* Perform the poll in short slices so board-specific transports can make
++   * progress while the FTP worker waits for socket readiness.
++   */
+ 
+-  ret = poll(fds, 1, timeout);
++  remaining = timeout;
++  do
++    {
++      int slice = timeout < 0 ? 10 : remaining > 10 ? 10 : remaining;
++
++      ftpd_activity_hook("rxpoll-wait");
++      ret = poll(fds, 1, slice);
++      if (ret != 0 || timeout == 0)
++        {
++          break;
++        }
++
++      if (timeout > 0)
++        {
++          remaining -= slice;
++        }
++    }
++  while (timeout < 0 || remaining > 0);
+ 
+   /* Handle the result of the poll.  On success, poll returns the number
+    * of structures that have nonzero revents fields.  A value of 0 indicates
+@@ -866,6 +896,7 @@ static int ftpd_rxpoll(int sd, int timeout)
+ static int ftpd_txpoll(int sd, int timeout)
+ {
+   struct pollfd fds[1];
++  int remaining;
+   int ret;
+ 
+   /* Set up the poll */
+@@ -874,9 +905,28 @@ static int ftpd_txpoll(int sd, int timeout)
+   fds[0].events  = POLLOUT;
+   fds[0].revents = 0;
+ 
+-  /* Perform the poll. */
++  /* Perform the poll in short slices so board-specific transports can make
++   * progress while the FTP worker waits for socket readiness.
++   */
+ 
+-  ret = poll(fds, 1, timeout);
++  remaining = timeout;
++  do
++    {
++      int slice = timeout < 0 ? 10 : remaining > 10 ? 10 : remaining;
++
++      ftpd_activity_hook("txpoll-wait");
++      ret = poll(fds, 1, slice);
++      if (ret != 0 || timeout == 0)
++        {
++          break;
++        }
++
++      if (timeout > 0)
++        {
++          remaining -= slice;
++        }
++    }
++  while (timeout < 0 || remaining > 0);
+ 
+   /* Handle the result of the poll.  On success, poll returns the number
+    * of structures that have nonzero revents fields.  A value of 0 indicates
+@@ -972,7 +1022,9 @@ static ssize_t ftpd_recv(int sd, FAR void *data, size_t size, int timeout)
+    * Zero (end-of-file) should be received in this case.
+    */
+ 
++  ftpd_activity_hook("recv");
+   ret = recv(sd, data, size, 0);
++  ftpd_activity_hook(ret < 0 ? "recv-fail" : "recv-ok");
+   if (ret < 0)
+     {
+       int errval = errno;
+@@ -1007,7 +1059,9 @@ static ssize_t ftpd_send(int sd, FAR const void *data, size_t size,
+ 
+   /* Then send the data (waiting if necessary) */
+ 
++  ftpd_activity_hook("send");
+   ret = send(sd, data, size, 0);
++  ftpd_activity_hook(ret < 0 ? "send-fail" : "send-ok");
+   if (ret < 0)
+     {
+       int errval = errno;
+diff --git a/netutils/netlib/netlib_listenon.c b/netutils/netlib/netlib_listenon.c
+index a80cd8158..f4cac544e 100644
+--- a/netutils/netlib/netlib_listenon.c
++++ b/netutils/netlib/netlib_listenon.c
+@@ -33,12 +33,24 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <nuttx/debug.h>
++#include <nuttx/compiler.h>
+ 
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ 
+ #include "netutils/netlib.h"
+ 
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++void weak_function netlib_server_activity_hook(FAR const char *phase,
++                                               uint16_t portno)
++{
++  (void)phase;
++  (void)portno;
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -73,6 +85,7 @@ int netlib_listenon(uint16_t portno)
+   if (listensd < 0)
+     {
+       nerr("ERROR: socket failure: %d\n", errno);
++      netlib_server_activity_hook("socket-fail", portno);
+       return ERROR;
+     }
+ 
+@@ -95,6 +108,7 @@ int netlib_listenon(uint16_t portno)
+            sizeof(struct sockaddr_in)) < 0)
+     {
+       nerr("ERROR: bind failure: %d\n", errno);
++      netlib_server_activity_hook("bind-fail", portno);
+       goto errout_with_socket;
+     }
+ 
+@@ -103,12 +117,14 @@ int netlib_listenon(uint16_t portno)
+   if (listen(listensd, 5) < 0)
+     {
+       nerr("ERROR: listen failure %d\n", errno);
++      netlib_server_activity_hook("listen-fail", portno);
+       goto errout_with_socket;
+     }
+ 
+   /* Begin accepting connections */
+ 
+   ninfo("Accepting connections on port %d\n", ntohs(portno));
++  netlib_server_activity_hook("listening", portno);
+   return listensd;
+ 
+ errout_with_socket:
+diff --git a/netutils/netlib/netlib_server.c b/netutils/netlib/netlib_server.c
+index 9436481bc..275ad5ca9 100644
+--- a/netutils/netlib/netlib_server.c
++++ b/netutils/netlib/netlib_server.c
+@@ -131,6 +131,7 @@ void netlib_server(uint16_t portno,
+ 
+       ret = pthread_create(&child, &attr,
+                            handler, (pthread_addr_t)((uintptr_t)acceptsd));
++      pthread_attr_destroy(&attr);
+       if (ret != 0)
+         {
+           /* Close the connection */
+diff --git a/netutils/webserver/Kconfig b/netutils/webserver/Kconfig
+index 6f33542e6..6cf9b119d 100644
+--- a/netutils/webserver/Kconfig
++++ b/netutils/webserver/Kconfig
+@@ -25,6 +25,14 @@ config NETUTILS_HTTPD_SINGLECONNECT
+ 		service all HTTP requests and, in this case, only a single connection
+ 		at a time is supported at a time.
+ 
++config NETUTILS_HTTPDSTACKSIZE
++	int "HTTP connection thread stack size"
++	default 4096
++	---help---
++		Stack size for each uIP web server connection thread.  REST/CGI
++		handlers that parse JSON or call application tool code may need a
++		larger stack than the static-file default.
++
+ config NETUTILS_HTTPD_SCRIPT_DISABLE
+ 	bool "Disable %! scripting"
+ 	default NETUTILS_HTTPD_SENDFILE
+@@ -75,6 +83,21 @@ config NETUTILS_HTTPD_CGIPATH
+ 		REST style interface over HTTP, where my CGI handlers just return a
+ 		HTTP status code with a content length of 0.
+ 
++config NETUTILS_HTTPD_POST
++	bool "POST request body support"
++	default n
++	---help---
++		This option lets the uIP web server accept bounded HTTP request
++		bodies with Content-Length.  Chunked request bodies are still
++		rejected.  This is intended for small CGI/REST style handlers.
++
++config NETUTILS_HTTPD_MAX_BODY
++	int "Maximum POST body size"
++	default 4096
++	depends on NETUTILS_HTTPD_POST
++	---help---
++		Maximum accepted HTTP request body size in bytes.
++
+ config NETUTILS_HTTPD_ERRPATH
+ 	string "Error Path"
+ 	default ""
+diff --git a/netutils/webserver/httpd.c b/netutils/webserver/httpd.c
+index 1cc8d58fc..f416de61d 100644
+--- a/netutils/webserver/httpd.c
++++ b/netutils/webserver/httpd.c
+@@ -52,7 +52,10 @@
+ #include <string.h>
+ #include <assert.h>
+ #include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
+ #include <nuttx/debug.h>
++#include <nuttx/compiler.h>
+ 
+ #ifndef CONFIG_NETUTILS_HTTPD_SINGLECONNECT
+ #  include <pthread.h>
+@@ -88,6 +91,10 @@
+ #define ISO_SLASH   0x2f
+ #define ISO_COLON   0x3a
+ 
++#ifdef CONFIG_NETUTILS_HTTPD_SINGLECONNECT
++#  define HTTPD_USE_SINGLECONNECT 1
++#endif
++
+ #ifndef CONFIG_NETUTILS_HTTPD_PATH
+ #  define CONFIG_NETUTILS_HTTPD_PATH "/mnt"
+ #endif
+@@ -124,6 +131,31 @@
+ #  endif
+ #endif
+ 
++#define HTTPD_SEND_CHUNK_MAX      MIN_TCP_MSS
++#define HTTPD_SEND_POLL_MS        10
++#define HTTPD_SEND_TIMEOUT_MS     500
++#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
++#  define HTTPD_SEND_RETRY_MAX    (CONFIG_NETUTILS_HTTPD_TIMEOUT * 100)
++#else
++#  define HTTPD_SEND_RETRY_MAX    500
++#endif
++#ifdef MSG_DONTWAIT
++#  define HTTPD_SEND_FLAGS        MSG_DONTWAIT
++#else
++#  define HTTPD_SEND_FLAGS        0
++#endif
++#define HTTPD_RECV_RETRY_DELAY_US 10000
++#ifdef MSG_DONTWAIT
++#  define HTTPD_RECV_FLAGS        MSG_DONTWAIT
++#else
++#  define HTTPD_RECV_FLAGS        0
++#endif
++#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
++#  define HTTPD_RECV_RETRY_MAX    (CONFIG_NETUTILS_HTTPD_TIMEOUT * 100)
++#else
++#  define HTTPD_RECV_RETRY_MAX    100
++#endif
++
+ /****************************************************************************
+  * Private Data
+  ****************************************************************************/
+@@ -132,6 +164,203 @@
+  * Private Functions
+  ****************************************************************************/
+ 
++void weak_function httpd_activity_hook(FAR const char *phase)
++{
++  (void)phase;
++}
++
++static int httpd_send_retry(int sockfd, FAR const void *buf, size_t len)
++{
++  FAR const uint8_t *ptr = (FAR const uint8_t *)buf;
++  size_t off = 0;
++  unsigned int retries = 0;
++  int oldflags;
++  bool restore_flags = false;
++#ifdef CONFIG_NET_SOCKOPTS
++  struct timeval old_sndtimeo;
++  socklen_t old_sndtimeo_len = sizeof(old_sndtimeo);
++  bool restore_sndtimeo = false;
++#endif
++
++  if (len == 0)
++    {
++      return 0;
++    }
++
++  oldflags = fcntl(sockfd, F_GETFL, 0);
++  if (oldflags >= 0 && (oldflags & O_NONBLOCK) == 0)
++    {
++      if (fcntl(sockfd, F_SETFL, oldflags | O_NONBLOCK) >= 0)
++        {
++          restore_flags = true;
++        }
++      else
++        {
++          httpd_activity_hook("send-nonblock-fail");
++        }
++    }
++  else if (oldflags < 0)
++    {
++      httpd_activity_hook("send-nonblock-fail");
++    }
++
++#ifdef CONFIG_NET_SOCKOPTS
++  if (getsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &old_sndtimeo,
++                 &old_sndtimeo_len) >= 0 &&
++      old_sndtimeo_len == sizeof(old_sndtimeo))
++    {
++      struct timeval sndtimeo;
++
++      sndtimeo.tv_sec = HTTPD_SEND_TIMEOUT_MS / 1000;
++      sndtimeo.tv_usec = (HTTPD_SEND_TIMEOUT_MS % 1000) * 1000;
++      if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &sndtimeo,
++                     sizeof(sndtimeo)) >= 0)
++        {
++          restore_sndtimeo = true;
++        }
++      else
++        {
++          httpd_activity_hook("send-timeout-fail");
++        }
++    }
++#endif
++
++  while (off < len)
++    {
++      size_t chunk = len - off;
++      ssize_t ret;
++
++      if (chunk > HTTPD_SEND_CHUNK_MAX)
++        {
++          chunk = HTTPD_SEND_CHUNK_MAX;
++        }
++
++      httpd_activity_hook("send-call");
++      ret = send(sockfd, ptr + off, chunk, HTTPD_SEND_FLAGS);
++      if (ret > 0)
++        {
++          off += ret;
++          retries = 0;
++          httpd_activity_hook("send-progress");
++          continue;
++        }
++
++      if (ret < 0 &&
++          (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
++        {
++          if (retries++ < HTTPD_SEND_RETRY_MAX)
++            {
++              struct pollfd pfd;
++
++              httpd_activity_hook(errno == EINTR ? "send-eintr" :
++                                                  "send-wait");
++              pfd.fd = sockfd;
++              pfd.events = POLLOUT;
++              pfd.revents = 0;
++              (void)poll(&pfd, 1, HTTPD_SEND_POLL_MS);
++              continue;
++            }
++
++          errno = ETIMEDOUT;
++        }
++      else if (ret == 0)
++        {
++          errno = EPIPE;
++        }
++
++      if (restore_flags)
++        {
++          (void)fcntl(sockfd, F_SETFL, oldflags);
++        }
++
++#ifdef CONFIG_NET_SOCKOPTS
++      if (restore_sndtimeo)
++        {
++          (void)setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &old_sndtimeo,
++                           sizeof(old_sndtimeo));
++        }
++#endif
++
++      return ERROR;
++    }
++
++  if (restore_flags)
++    {
++      (void)fcntl(sockfd, F_SETFL, oldflags);
++    }
++
++#ifdef CONFIG_NET_SOCKOPTS
++  if (restore_sndtimeo)
++    {
++      (void)setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &old_sndtimeo,
++                       sizeof(old_sndtimeo));
++    }
++#endif
++
++  return (int)len;
++}
++
++static ssize_t httpd_recv_retry(int sockfd, FAR void *buf, size_t len,
++                                FAR const char *wait_phase)
++{
++  unsigned int retries = 0;
++  int oldflags;
++  bool restore_flags = false;
++
++  oldflags = fcntl(sockfd, F_GETFL, 0);
++  if (oldflags >= 0 && (oldflags & O_NONBLOCK) == 0)
++    {
++      if (fcntl(sockfd, F_SETFL, oldflags | O_NONBLOCK) >= 0)
++        {
++          restore_flags = true;
++        }
++      else
++        {
++          httpd_activity_hook("recv-nonblock-fail");
++        }
++    }
++  else if (oldflags < 0)
++    {
++      httpd_activity_hook("recv-nonblock-fail");
++    }
++
++  for (; ; )
++    {
++      ssize_t ret;
++
++      ret = recv(sockfd, buf, len, HTTPD_RECV_FLAGS);
++      if (ret >= 0)
++        {
++          if (restore_flags)
++            {
++              (void)fcntl(sockfd, F_SETFL, oldflags);
++            }
++
++          return ret;
++        }
++
++      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
++        {
++          if (retries++ < HTTPD_RECV_RETRY_MAX)
++            {
++              httpd_activity_hook(wait_phase != NULL ? wait_phase :
++                                  "recv-wait");
++              usleep(HTTPD_RECV_RETRY_DELAY_US);
++              continue;
++            }
++
++          errno = ETIMEDOUT;
++        }
++
++      if (restore_flags)
++        {
++          (void)fcntl(sockfd, F_SETFL, oldflags);
++        }
++
++      return ERROR;
++    }
++}
++
+ static int httpd_open(const char *name, struct httpd_fs_file *file)
+ {
+ #if defined(CONFIG_NETUTILS_HTTPD_CLASSIC)
+@@ -350,13 +579,26 @@ static int send_chunk(struct httpd_state *pstate, const char *buf, int len)
+ 
+   do
+     {
+-      httpd_dumpbuffer("Outgoing chunk", buf, len);
+-      ret = send(pstate->ht_sockfd, buf, len, 0);
+-      if (ret < 0)
++      int chunk = len;
++
++      httpd_activity_hook("send");
++      if (chunk > HTTPD_SEND_CHUNK_MAX)
++        {
++          chunk = HTTPD_SEND_CHUNK_MAX;
++        }
++
++      httpd_dumpbuffer("Outgoing chunk", buf, chunk);
++      ret = httpd_send_retry(pstate->ht_sockfd, buf, chunk);
++      if (ret <= 0)
+         {
++          char phase[32];
++
++          snprintf(phase, sizeof(phase), "send-fail-%d", errno);
++          httpd_activity_hook(phase);
+           return ERROR;
+         }
+ 
++      httpd_activity_hook("sent");
+       buf += ret;
+       len -= ret;
+     }
+@@ -365,6 +607,147 @@ static int send_chunk(struct httpd_state *pstate, const char *buf, int len)
+   return OK;
+ }
+ 
++static const char *httpd_status_text(int status)
++{
++  switch (status)
++    {
++      case 200:
++        return "OK";
++      case 202:
++        return "Accepted";
++      case 204:
++        return "No Content";
++      case 400:
++        return "Bad Request";
++      case 405:
++        return "Method Not Allowed";
++      case 408:
++        return "Request Timeout";
++      case 411:
++        return "Length Required";
++      case 413:
++        return "Payload Too Large";
++      case 414:
++        return "URI Too Long";
++      case 415:
++        return "Unsupported Media Type";
++      case 500:
++        return "Internal Server Error";
++      case 501:
++        return "Not Implemented";
++      case 505:
++        return "HTTP Version Not Supported";
++      default:
++        return status >= 400 ? "Error" : "OK";
++    }
++}
++
++static void httpd_copy_header_value(FAR char *dst, size_t dstlen,
++                                    FAR const char *src)
++{
++  if (dst == NULL || dstlen == 0)
++    {
++      return;
++    }
++
++  if (src == NULL)
++    {
++      dst[0] = '\0';
++      return;
++    }
++
++  strlcpy(dst, src, dstlen);
++}
++
++static bool httpd_header_contains(FAR const char *value,
++                                  FAR const char *token)
++{
++  size_t token_len;
++
++  if (value == NULL || token == NULL)
++    {
++      return false;
++    }
++
++  token_len = strlen(token);
++  while (*value != '\0')
++    {
++      if (strncasecmp(value, token, token_len) == 0)
++        {
++          return true;
++        }
++
++      value++;
++    }
++
++  return false;
++}
++
++static void httpd_free_request(struct httpd_state *pstate)
++{
++  if (pstate->ht_body != NULL)
++    {
++      free(pstate->ht_body);
++      pstate->ht_body = NULL;
++    }
++
++  pstate->ht_bodylen = 0;
++  pstate->ht_content_length = 0;
++  pstate->ht_content_length_present = false;
++  pstate->ht_content_type[0] = '\0';
++  pstate->ht_accept[0] = '\0';
++  pstate->ht_origin[0] = '\0';
++  pstate->ht_authorization[0] = '\0';
++  pstate->ht_mcp_protocol_version[0] = '\0';
++  pstate->ht_mcp_session_id[0] = '\0';
++}
++
++int httpd_send_response(FAR struct httpd_state *pstate, int status,
++                        FAR const char *content_type,
++                        FAR const char *extra_headers,
++                        FAR const char *body, int body_len)
++{
++  char header[HTTPD_MAX_HEADERLEN + 256];
++  int hdrlen;
++  int ret;
++
++  if (body == NULL || body_len < 0)
++    {
++      body = "";
++      body_len = 0;
++    }
++
++#ifndef CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE
++  pstate->ht_keepalive = false;
++#endif
++
++  hdrlen = snprintf(header, sizeof(header),
++                    "HTTP/1.0 %d %s\r\n"
++#ifndef CONFIG_NETUTILS_HTTPD_SERVERHEADER_DISABLE
++                    "Server: uIP/NuttX http://nuttx.org/\r\n"
++#endif
++                    "Connection: close\r\n"
++                    "Content-Type: %s\r\n"
++                    "Content-Length: %d\r\n"
++                    "%s"
++                    "\r\n",
++                    status, httpd_status_text(status),
++                    content_type ? content_type : "text/plain",
++                    body_len, extra_headers ? extra_headers : "");
++  if (hdrlen < 0 || hdrlen >= (int)sizeof(header))
++    {
++      return ERROR;
++    }
++
++  ret = send_chunk(pstate, header, hdrlen);
++  if (ret < 0 || body_len == 0)
++    {
++      return ret;
++    }
++
++  return send_chunk(pstate, body, body_len);
++}
++
+ static int httpd_senderror(struct httpd_state *pstate, int status)
+ {
+   int ret;
+@@ -496,6 +879,76 @@ done:
+   return ret;
+ }
+ 
++static int httpd_read_body(struct httpd_state *pstate, size_t buffered)
++{
++#ifdef CONFIG_NETUTILS_HTTPD_POST
++  size_t off;
++
++  if (pstate->ht_method != HTTPD_METHOD_POST)
++    {
++      return 0;
++    }
++
++  if (!pstate->ht_content_length_present)
++    {
++      return 411;
++    }
++
++  if (pstate->ht_content_length > CONFIG_NETUTILS_HTTPD_MAX_BODY)
++    {
++      return 413;
++    }
++
++  pstate->ht_body = calloc(1, pstate->ht_content_length + 1);
++  if (pstate->ht_body == NULL)
++    {
++      return 500;
++    }
++
++  off = MIN((size_t)pstate->ht_content_length, buffered);
++  if (off > 0)
++    {
++      memcpy(pstate->ht_body, pstate->ht_buffer, off);
++    }
++
++  while (off < (size_t)pstate->ht_content_length)
++    {
++      ssize_t r;
++
++      httpd_activity_hook("recv-body");
++      r = httpd_recv_retry(pstate->ht_sockfd, pstate->ht_body + off,
++                           pstate->ht_content_length - off,
++                           "recv-body-wait");
++      if (r == 0)
++        {
++          return 400;
++        }
++
++      if (r == -1)
++        {
++          if (errno == EWOULDBLOCK || errno == EAGAIN ||
++              errno == ETIMEDOUT)
++            {
++              return 408;
++            }
++
++          return 400;
++        }
++
++      off += r;
++      httpd_activity_hook("recv-body-ok");
++    }
++
++  pstate->ht_body[pstate->ht_content_length] = '\0';
++  pstate->ht_bodylen = pstate->ht_content_length;
++  return 0;
++#else
++  (void)pstate;
++  (void)buffered;
++  return 0;
++#endif
++}
++
+ static inline int httpd_parse(struct httpd_state *pstate)
+ {
+   char *o;
+@@ -509,6 +962,7 @@ static inline int httpd_parse(struct httpd_state *pstate)
+ 
+   state = STATE_METHOD;
+   o = pstate->ht_buffer;
++  pstate->ht_method = HTTPD_METHOD_GET;
+ 
+   do
+     {
+@@ -524,30 +978,32 @@ static inline int httpd_parse(struct httpd_state *pstate)
+         {
+           ssize_t r;
+ 
+-          r = recv(pstate->ht_sockfd, o,
+-            sizeof pstate->ht_buffer - (o - pstate->ht_buffer), 0);
++          httpd_activity_hook("recv-header");
++          r = httpd_recv_retry(pstate->ht_sockfd, o,
++            sizeof pstate->ht_buffer - (o - pstate->ht_buffer),
++            "recv-header-wait");
+           if (r == 0)
+             {
+               nwarn("WARNING: [%d] connection lost\n", pstate->ht_sockfd);
+               return ERROR;
+             }
+ 
+-#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
+-          if (r == -1 && errno == EWOULDBLOCK)
+-            {
+-              nwarn("WARNING: recv timeout\n");
+-              return 408;
+-            }
+-#endif
+-
+           if (r == -1)
+             {
++              if (errno == EWOULDBLOCK || errno == EAGAIN ||
++                  errno == ETIMEDOUT)
++                {
++                  nwarn("WARNING: recv timeout\n");
++                  return 408;
++                }
++
+               nerr("ERROR: [%d] recv failed: %d\n",
+                    pstate->ht_sockfd, errno);
+               return 400;
+             }
+ 
+           o += r;
++          httpd_activity_hook("recv-header-ok");
+         }
+ 
+       /* Here o marks the end of the total block currently awaiting
+@@ -579,38 +1035,71 @@ static inline int httpd_parse(struct httpd_state *pstate)
+           char *v;
+ 
+           case STATE_METHOD:
+-            if (0 != strncmp(start, "GET ", 4))
+-              {
+-                nwarn("WARNING: method not supported\n");
+-                return 501;
+-              }
++            {
++              char *method = start;
++              char *path = strchr(start, ' ');
+ 
+-            start += 4;
+-            v = start + strcspn(start, " ");
++              if (path == NULL)
++                {
++                  return 400;
++                }
+ 
+-            if (0 != strcmp(v, " HTTP/1.0") && 0 != strcmp(v, " HTTP/1.1"))
+-              {
+-                nwarn("WARNING: HTTP version not supported\n");
+-                return 505;
+-              }
++              *path++ = '\0';
++              v = path + strcspn(path, " ");
+ 
+-            /* TODO: url decoding */
++              if (0 != strcmp(v, " HTTP/1.0") &&
++                  0 != strcmp(v, " HTTP/1.1"))
++                {
++                  nwarn("WARNING: HTTP version not supported\n");
++                  return 505;
++                }
+ 
+-            if (v - start >= sizeof pstate->ht_filename)
+-              {
+-                nerr("ERROR: ht_filename overflow\n");
+-                return 414;
+-              }
++              if (strcmp(method, "GET") == 0)
++                {
++                  pstate->ht_method = HTTPD_METHOD_GET;
++                }
++              else if (strcmp(method, "POST") == 0)
++                {
++#ifdef CONFIG_NETUTILS_HTTPD_POST
++                  pstate->ht_method = HTTPD_METHOD_POST;
++#else
++                  return 501;
++#endif
++                }
++              else if (strcmp(method, "DELETE") == 0)
++                {
++                  pstate->ht_method = HTTPD_METHOD_DELETE;
++                }
++              else if (strcmp(method, "OPTIONS") == 0)
++                {
++                  pstate->ht_method = HTTPD_METHOD_OPTIONS;
++                }
++              else
++                {
++                  pstate->ht_method = HTTPD_METHOD_UNSUPPORTED;
++                  return 501;
++                }
++
++              /* TODO: url decoding */
+ 
+-            *v = '\0';
+-            strlcpy(pstate->ht_filename, start, sizeof(pstate->ht_filename));
+-            state = STATE_HEADER;
++              if (v - path >= sizeof pstate->ht_filename)
++                {
++                  nerr("ERROR: ht_filename overflow\n");
++                  return 414;
++                }
++
++              *v = '\0';
++              strlcpy(pstate->ht_filename, path,
++                      sizeof(pstate->ht_filename));
++              state = STATE_HEADER;
++            }
+             break;
+ 
+           case STATE_HEADER:
+             if (*start == '\0')
+               {
+                 state = STATE_BODY;
++                start = end;
+                 break;
+               }
+ 
+@@ -630,10 +1119,60 @@ static inline int httpd_parse(struct httpd_state *pstate)
+             ninfo("[%d] Request header %s: %s\n",
+                   pstate->ht_sockfd, start, v);
+ 
+-            if (0 == strcasecmp(start, "Content-Length") && 0 != atoi(v))
++            if (0 == strcasecmp(start, "Content-Length"))
+               {
+-                nwarn("WARNING: non-zero request length\n");
+-                return 413;
++                char *endptr;
++                long length = strtol(v, &endptr, 10);
++
++                if (*endptr != '\0' || length < 0)
++                  {
++                    return 400;
++                  }
++
++                pstate->ht_content_length_present = true;
++                pstate->ht_content_length = length;
++#ifndef CONFIG_NETUTILS_HTTPD_POST
++                if (length != 0)
++                  {
++                    nwarn("WARNING: non-zero request length\n");
++                    return 413;
++                  }
++#endif
++              }
++            else if (0 == strcasecmp(start, "Transfer-Encoding") &&
++                     httpd_header_contains(v, "chunked"))
++              {
++                return 501;
++              }
++            else if (0 == strcasecmp(start, "Content-Type"))
++              {
++                httpd_copy_header_value(pstate->ht_content_type,
++                                        sizeof(pstate->ht_content_type), v);
++              }
++            else if (0 == strcasecmp(start, "Accept"))
++              {
++                httpd_copy_header_value(pstate->ht_accept,
++                                        sizeof(pstate->ht_accept), v);
++              }
++            else if (0 == strcasecmp(start, "Origin"))
++              {
++                httpd_copy_header_value(pstate->ht_origin,
++                                        sizeof(pstate->ht_origin), v);
++              }
++            else if (0 == strcasecmp(start, "Authorization"))
++              {
++                httpd_copy_header_value(pstate->ht_authorization,
++                                        sizeof(pstate->ht_authorization), v);
++              }
++            else if (0 == strcasecmp(start, "MCP-Protocol-Version"))
++              {
++                httpd_copy_header_value(pstate->ht_mcp_protocol_version,
++                    sizeof(pstate->ht_mcp_protocol_version), v);
++              }
++            else if (0 == strcasecmp(start, "MCP-Session-Id"))
++              {
++                httpd_copy_header_value(pstate->ht_mcp_session_id,
++                    sizeof(pstate->ht_mcp_session_id), v);
+               }
+ #ifndef CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE
+             else if (0 == strcasecmp(start, "Connection") &&
+@@ -645,11 +1184,13 @@ static inline int httpd_parse(struct httpd_state *pstate)
+             break;
+ 
+           case STATE_BODY:
+-
+-            /* Not implemented */
+-
+             break;
+           }
++
++          if (state == STATE_BODY)
++            {
++              break;
++            }
+        }
+ 
+       /* Shuffle down for the next block */
+@@ -659,8 +1200,17 @@ static inline int httpd_parse(struct httpd_state *pstate)
+     }
+   while (state != STATE_BODY);
+ 
++    {
++      int ret = httpd_read_body(pstate, o - pstate->ht_buffer);
++      if (ret != 0)
++        {
++          return ret;
++        }
++    }
++
+ #ifdef CONFIG_NETUTILS_HTTPD_CLASSIC
+-  if (0 == strcmp(pstate->ht_filename, "/"))
++  if (pstate->ht_method == HTTPD_METHOD_GET &&
++      0 == strcmp(pstate->ht_filename, "/"))
+     {
+       strlcpy(pstate->ht_filename, "/" CONFIG_NETUTILS_HTTPD_INDEX,
+               sizeof(pstate->ht_filename));
+@@ -689,6 +1239,7 @@ static void *httpd_handler(void *arg)
+   int sockfd = (intptr_t)arg;
+ 
+   ninfo("[%d] Started\n", sockfd);
++  httpd_activity_hook("handler-start");
+ 
+   /* Verify that the state structure was successfully allocated */
+ 
+@@ -701,6 +1252,28 @@ static void *httpd_handler(void *arg)
+       memset(pstate, 0, sizeof(struct httpd_state));
+       pstate->ht_sockfd = sockfd;
+ 
++#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
++        {
++          struct timeval tv;
++
++          tv.tv_sec  = CONFIG_NETUTILS_HTTPD_TIMEOUT;
++          tv.tv_usec = 0;
++          if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv,
++                         sizeof(struct timeval)) < 0)
++            {
++              nwarn("WARNING: setsockopt SO_RCVTIMEO failure: %d\n",
++                    errno);
++            }
++
++          if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv,
++                         sizeof(struct timeval)) < 0)
++            {
++              nwarn("WARNING: setsockopt SO_SNDTIMEO failure: %d\n",
++                    errno);
++            }
++        }
++#endif
++
+ #ifndef CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE
+       do
+         {
+@@ -711,13 +1284,17 @@ static void *httpd_handler(void *arg)
+           status = httpd_parse(pstate);
+           if (status >= 400)
+             {
++              httpd_activity_hook("parse-error");
+               httpd_senderror(pstate, status);
+             }
+           else
+             {
++              httpd_activity_hook("parsed");
+               httpd_sendfile(pstate);
+             }
+ 
++          httpd_free_request(pstate);
++
+ #ifndef CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE
+         }
+       while (pstate->ht_keepalive);
+@@ -725,24 +1302,48 @@ static void *httpd_handler(void *arg)
+ 
+       /* End of command processing -- Clean up and exit */
+ 
++      httpd_free_request(pstate);
+       free(pstate);
+     }
++  else
++    {
++      static const char unavailable[] =
++        "HTTP/1.0 503 Service Unavailable\r\n"
++        "Connection: close\r\n"
++        "Content-Type: text/plain\r\n"
++        "Content-Length: 24\r\n"
++        "\r\n"
++        "httpd malloc failed\n";
++
++      httpd_activity_hook("malloc-fail");
++      (void)httpd_send_retry(sockfd, unavailable, sizeof(unavailable) - 1);
++    }
+ 
+   /* Exit the task */
+ 
+   ninfo("[%d] Exiting\n", sockfd);
++  httpd_activity_hook("close");
++
++  /* Some small TCP stacks need a short drain window after the final response
++   * write.  Closing immediately after send() can make stricter HTTP clients
++   * observe resets and can leave the server-side TCP path unhealthy after a
++   * handful of rapid MCP calls.
++   */
++
++  usleep(100 * 1000);
++  httpd_activity_hook("close-drain");
+   close(sockfd);
+   return NULL;
+ }
+ 
+-#ifdef CONFIG_NETUTILS_HTTPD_SINGLECONNECT
++#ifdef HTTPD_USE_SINGLECONNECT
+ static void single_server(uint16_t portno, pthread_startroutine_t handler,
+                           int stacksize)
+ {
+   struct sockaddr_in myaddr;
+   socklen_t addrlen;
+   int listensd;
+-  int acceptsd;
++  int acceptsd = -1;
+ #ifdef CONFIG_NET_SOLINGER
+   struct linger ling;
+ #endif
+@@ -789,7 +1390,10 @@ static void single_server(uint16_t portno, pthread_startroutine_t handler,
+ #endif
+ 
+ #if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
+-      /* Set up a receive timeout */
++      /* Set up receive and send timeouts.  Single-connect mode handles the
++       * request in the listener thread; a stalled peer must not pin the whole
++       * webserver behind one accepted socket.
++       */
+ 
+       tv.tv_sec  = CONFIG_NETUTILS_HTTPD_TIMEOUT;
+       tv.tv_usec = 0;
+@@ -800,16 +1404,29 @@ static void single_server(uint16_t portno, pthread_startroutine_t handler,
+           nerr("ERROR: setsockopt SO_RCVTIMEO failure: %d\n", errno);
+           break;
+         }
++
++      if (setsockopt(acceptsd, SOL_SOCKET, SO_SNDTIMEO, &tv,
++                     sizeof(struct timeval)) < 0)
++        {
++          close(acceptsd);
++          nerr("ERROR: setsockopt SO_SNDTIMEO failure: %d\n", errno);
++          break;
++        }
+ #endif
+ 
+       /* Handle the request. This blocks until complete. */
+ 
+       handler((FAR void *)acceptsd);
++      acceptsd = -1;
+     }
+ 
+   /* Close the sockets */
+ 
+-  close(acceptsd);
++  if (acceptsd >= 0)
++    {
++      close(acceptsd);
++    }
++
+   close(listensd);
+ }
+ #endif
+@@ -837,7 +1454,7 @@ int httpd_listen(void)
+ {
+   /* Execute httpd_handler on each connection to port 80 */
+ 
+-#ifdef CONFIG_NETUTILS_HTTPD_SINGLECONNECT
++#ifdef HTTPD_USE_SINGLECONNECT
+   single_server(HTONS(80), httpd_handler, CONFIG_NETUTILS_HTTPDSTACKSIZE);
+ #else
+   netlib_server(HTONS(80), httpd_handler, CONFIG_NETUTILS_HTTPDSTACKSIZE);
+@@ -866,7 +1483,8 @@ int httpd_send_datachunk(int sockfd, void *data, int len, bool chunked)
+     {
+       int chunked_info_len = snprintf(chunked_info, HTTPD_MAX_CHUNKEDLEN,
+            "%X\r\n", len);
+-      ret = send(sockfd, chunked_info, chunked_info_len, 0);
++      httpd_activity_hook("send-chunk-header");
++      ret = httpd_send_retry(sockfd, chunked_info, chunked_info_len);
+       DEBUGASSERT(ret == chunked_info_len);
+     }
+ #endif
+@@ -882,7 +1500,8 @@ int httpd_send_datachunk(int sockfd, void *data, int len, bool chunked)
+           data = &len;
+         }
+ 
+-      ret = send(sockfd, data, len, 0);
++      httpd_activity_hook("send-datachunk");
++      ret = httpd_send_retry(sockfd, data, len);
+       DEBUGASSERT(ret == len);
+     }
+ 
+@@ -893,7 +1512,8 @@ int httpd_send_datachunk(int sockfd, void *data, int len, bool chunked)
+     {
+       if (chunked)
+         {
+-          ret = send(sockfd, "\r\n", 2, 0);
++          httpd_activity_hook("send-chunk-footer");
++          ret = httpd_send_retry(sockfd, "\r\n", 2);
+           DEBUGASSERT(ret == 2);
+         }
+     }
+diff --git a/system/dhcpc/renew_main.c b/system/dhcpc/renew_main.c
+index cbd10aa28..e5a5ecfcb 100644
+--- a/system/dhcpc/renew_main.c
++++ b/system/dhcpc/renew_main.c
+@@ -28,6 +28,7 @@
+ 
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <errno.h>
+ 
+ #include <net/if.h>
+ 
+@@ -70,7 +71,8 @@ int main(int argc, FAR char *argv[])
+   ret = netlib_obtain_ipv4addr(argv[1]);
+   if (ret < 0)
+     {
+-      fprintf(stderr, "ERROR: netlib_obtain_ipv4addr() failed\n");
++      fprintf(stderr, "ERROR: netlib_obtain_ipv4addr(%s) failed: "
++              "ret=%d errno=%d\n", argv[1], ret, errno);
+       return EXIT_FAILURE;
+     }
+ 

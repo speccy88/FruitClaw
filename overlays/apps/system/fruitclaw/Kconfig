@@ -1,0 +1,707 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_FRUITCLAW
+	tristate "'fruitclaw' embedded agent"
+	default n
+	depends on NET && NET_TCP
+	select LIBC_NETDB
+	select NET_SOCKOPTS
+	select NETUTILS_CJSON
+	select NETUTILS_WEBCLIENT
+	select CRYPTO_MBEDTLS if FRUITCLAW_ENABLE_TLS
+	---help---
+		Enable FruitClaw, a small NuttX-native embedded agent client for
+		Adafruit Fruit Jam / RP2350.  FruitClaw talks to Telegram through
+		long polling, calls DeepSeek through the OpenAI-compatible
+		chat/completions API, persists JSONL memory/session files, and
+		exposes a bounded tool registry.
+
+if SYSTEM_FRUITCLAW
+
+config FRUITCLAW_PROGNAME
+	string "Program name"
+	default "fruitclaw"
+
+config FRUITCLAW_PRIORITY
+	int "fruitclaw task priority"
+	default 100
+
+config FRUITCLAW_STACKSIZE
+	int "fruitclaw stack size"
+	default 8192
+
+config FRUITCLAW_WORKER_STACKSIZE
+	int "fruitclaw heavy worker stack size"
+	default 12288
+	---help---
+		Stack used by heavy FruitClaw workers such as the agent and
+		Telegram poller.  Lightweight supervisors use the smaller stack
+		settings below so unattended autostart does not consume all RAM.
+
+config FRUITCLAW_SMALL_STACKSIZE
+	int "fruitclaw lightweight worker stack size"
+	default 4096
+	range 2048 16384
+	---help---
+		Stack used by simple event routers, schedulers, service probes, and
+		network recovery helpers.  These threads must stay small on the
+		RP2350 Fruit Jam profile so NSH built-in applications can still be
+		launched after FruitClaw autostart.
+
+config FRUITCLAW_GUARD_STACKSIZE
+	int "fruitclaw watchdog guard stack size"
+	default 2048
+	range 1024 8192
+	---help---
+		Stack used by watchdog feeder and BOOTSEL/recovery guard helper
+		threads.  These threads only sleep, update state, and feed the
+		RP2350 watchdog, so using the heavy agent stack wastes RAM.
+
+config FRUITCLAW_BOOT_NETWORK_STACKSIZE
+	int "fruitclaw boot network stack size"
+	default 8192
+	range 4096 16384
+	---help---
+		Stack used by the boot-time Wi-Fi/service bring-up thread.  It is
+		larger than other lightweight supervisors because it runs WAPI,
+		DHCP, and service startup logic, but still smaller than the LLM and
+		Telegram workers.
+
+config FRUITCLAW_BOOT_AUTOSTART
+	bool "Autostart FruitClaw from board rcS"
+	default n
+	---help---
+		Start `fruitclaw boot` from the board ROMFS startup script.  The
+		boot command performs optional Wi-Fi/NTP/HTTPD bring-up, then enters
+		the normal foreground FruitClaw runtime with the long session guard.
+
+config FRUITCLAW_BOOT_START_WEBSERVER
+	bool "Start the uIP webserver from fruitclaw boot"
+	default y if FRUITCLAW_MCP_SERVER
+	depends on NETUTILS_WEBSERVER
+	---help---
+		Start the NuttX webserver command before the FruitClaw runtime so the
+		MCP /mcp CGI endpoint is reachable after unattended reset.
+
+config FRUITCLAW_BOOT_START_NTPC
+	bool "Start NTP client from fruitclaw boot"
+	default y
+	depends on SYSTEM_NTPC
+	---help---
+		Start the NuttX NTP client after Wi-Fi bring-up so tools such as
+		time.now use wall-clock time instead of the RP2350 reset epoch.
+
+config FRUITCLAW_BOOT_START_TELNETD
+	bool "Start telnetd from fruitclaw boot"
+	default y if SYSTEM_TELNETD
+	depends on SYSTEM_TELNETD
+	---help---
+		Start the NuttX telnet daemon after FruitClaw boot network bring-up.
+		This keeps a remote NSH recovery/control path available in the
+		operator image without adding a second telnet implementation.
+
+config FRUITCLAW_BOOT_START_FTPD
+	bool "Start FTPD from fruitclaw boot"
+	default y if EXAMPLES_FTPD
+	depends on EXAMPLES_FTPD && NETUTILS_FTPD
+	---help---
+		Start the NuttX FTPD example daemon after FruitClaw boot network
+		bring-up.  The compiled ftpd_start/ftpd_stop apps remain the source
+		of truth for FTP behavior.
+
+config FRUITCLAW_SERVICE_ACTIVE_PROBES
+	bool "Actively reconcile FruitClaw service health"
+	default y
+	---help---
+		Reconcile started services against non-destructive local evidence
+		before reporting status.  Telnet is checked with its PID file, the
+		webserver with its owning FruitClaw task/listener state, and FTP with
+		the daemon start state.  Do not use raw board-to-self TCP connects
+		here: on this esp-hosted/uIP profile they can produce false FTP
+		failures and can pin the small HTTP server behind an empty accepted
+		connection.
+
+config FRUITCLAW_DATA_DIR
+	string "FruitClaw fallback data directory"
+	default "/data/fruitclaw"
+
+config FRUITCLAW_SD_DATA_DIR
+	string "FruitClaw SD data directory"
+	default "/mnt/sd0/fruitclaw"
+
+config FRUITCLAW_PREFER_SD_DATA_DIR
+	bool "Prefer SD data directory at boot"
+	default n
+	---help---
+		Use FRUITCLAW_SD_DATA_DIR when the SD card is mounted and writable.
+		FruitClaw creates the data directory and .fruitclaw-ready marker on
+		first boot.  If the SD path is absent or unwritable, FruitClaw falls
+		back to FRUITCLAW_DATA_DIR so serial diagnostics still come up.
+
+config FRUITCLAW_WEB_HOME_MAX_BYTES
+	int "Maximum custom web home Markdown bytes"
+	default 4096
+	range 512 16384
+	---help---
+		Maximum size of the owner-editable Markdown body served at
+		/site/home.md and rendered by the root web page.  The content is
+		stored in www/home.md under the active FruitClaw data root.
+
+config FRUITCLAW_OWNER_MODE
+	bool "Enable owner-mode tools for trusted local and allowed Telegram users"
+	default y
+	---help---
+		Allow local CLI and allowed Telegram chats to use mutating tools
+		without per-action confirmation.  Scheduled jobs inherit the context
+		that created them.
+
+config FRUITCLAW_WIFI_AUTOSTART
+	bool "Join Wi-Fi from fruitclaw boot"
+	default n
+	depends on WIRELESS_WAPI && SYSTEM_DHCPC_RENEW
+	---help---
+		Read Wi-Fi settings from the FruitClaw data root and run the WAPI
+		association plus DHCP renewal sequence during `fruitclaw boot`.
+
+config FRUITCLAW_WIFI_IFNAME
+	string "FruitClaw Wi-Fi interface name"
+	default "wlan0"
+	depends on FRUITCLAW_WIFI_AUTOSTART
+
+config FRUITCLAW_WIFI_CONFIG_LEAF
+	string "FruitClaw Wi-Fi config leaf"
+	default "wifi.conf"
+	depends on FRUITCLAW_WIFI_AUTOSTART
+	---help---
+		Relative file under the active FruitClaw data root.  Supported keys
+		are ssid=, password= or psk=, key_mgmt=, and cipher=.
+
+config FRUITCLAW_WIFI_CONFIG_PATH
+	string "FruitClaw preferred Wi-Fi config path"
+	default ""
+	depends on FRUITCLAW_WIFI_AUTOSTART
+	---help---
+		Absolute Wi-Fi config path checked before the data-root relative
+		leaf.  Leave this empty for unattended bring-up so a missing, slow,
+		or unhealthy SD card cannot block Wi-Fi/status bootstrap.
+
+config FRUITCLAW_WIFI_COMMAND_RETRIES
+	int "FruitClaw Wi-Fi command retries"
+	default 4
+	range 1 16
+	depends on FRUITCLAW_WIFI_AUTOSTART
+	---help---
+		Number of times FruitClaw retries the ifup/WAPI/DHCP sequence after
+		the ESP-Hosted transport is started.  This covers the common boot
+		race where wlan0 exists but the hosted Wi-Fi path is not yet ready
+		to accept all WAPI commands.
+
+config FRUITCLAW_WIFI_COMMAND_RETRY_DELAY_SEC
+	int "FruitClaw Wi-Fi command retry delay"
+	default 2
+	range 0 30
+	depends on FRUITCLAW_WIFI_AUTOSTART
+	---help---
+		Delay between FruitClaw Wi-Fi command retries.
+
+config FRUITCLAW_MAX_EVENT_QUEUE
+	int "Maximum queued events"
+	default 16
+
+config FRUITCLAW_MAX_EVENT_TEXT
+	int "Maximum event text bytes"
+	default 1024
+
+config FRUITCLAW_MAX_JSON
+	int "Maximum JSON bytes"
+	default 8192
+
+config FRUITCLAW_MAX_HTTP_BODY
+	int "Maximum HTTP response body bytes"
+	default 65536
+
+config FRUITCLAW_MAX_SESSION_MESSAGES
+	int "Maximum session messages in context"
+	default 16
+
+config FRUITCLAW_MAX_TOOL_ITERATIONS
+	int "Maximum tool-call iterations"
+	default 6
+
+config FRUITCLAW_ENABLE_TLS
+	bool "Enable HTTPS through mbedTLS"
+	default y
+
+config FRUITCLAW_TLS_CA_CERT_PATH
+	string "TLS CA bundle path"
+	default "/data/fruitclaw/certs/roots.pem"
+	depends on FRUITCLAW_ENABLE_TLS
+
+config FRUITCLAW_TLS_ALLOW_UNVERIFIED
+	bool "Allow unverified TLS certificates"
+	default n
+	depends on FRUITCLAW_ENABLE_TLS
+	---help---
+		Do not fail HTTPS requests when the peer certificate cannot be
+		verified.  This is intended only for bring-up; production images
+		should install a CA bundle and leave this disabled.
+
+config FRUITCLAW_ENABLE_TELEGRAM
+	bool "Enable Telegram channel"
+	default y
+
+config FRUITCLAW_TELEGRAM_POLL_TIMEOUT_SEC
+	int "Telegram long poll timeout in seconds"
+	default 2
+	range 0 30
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Telegram getUpdates long-poll timeout.  FruitClaw keeps this
+		shorter than Telegram's maximum during bring-up so background
+		polling yields regularly to MCP, CLI, and owner tools.  Use 0 for
+		short-poll compatibility on bring-up images where held-open TLS
+		getUpdates calls are not yet reliable.
+
+config FRUITCLAW_TELEGRAM_POLL_IDLE_MS
+	int "Telegram idle delay between long polls in milliseconds"
+	default 750
+	range 0 10000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Delay after a successful Telegram poll before starting the next
+		getUpdates request.  This gives MCP, CLI status, and owner tools a
+		predictable chance to use the shared HTTP lane instead of racing a
+		continuous Telegram long-poll loop.
+
+config FRUITCLAW_TELEGRAM_START_DELAY_MS
+	int "Telegram startup delay before first poll in milliseconds"
+	default 3000
+	range 0 60000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Delay the first outbound Telegram poll after FruitClaw runtime
+		starts.  This lets local services such as the MCP HTTP handler come
+		up before the board begins Telegram long-poll traffic.
+
+config FRUITCLAW_TELEGRAM_NOTIFY_QUEUE_LEN
+	int "Telegram owner notification queue length"
+	default 32
+	range 1 64
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Bounded queue for asynchronous owner notifications, including MCP
+		tool-call notices.  A larger queue lets rapid MCP smoke tests report
+		each call over Telegram without blocking the owner tool path.
+
+config FRUITCLAW_TELEGRAM_NOTIFY_BATCH_MAX
+	int "Telegram owner notifications per send"
+	default 6
+	range 1 10
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Maximum queued owner notifications to combine into one Telegram
+		message.  Batching keeps MCP bursts visible to the owner without
+		requiring one HTTPS request per tool call.
+
+config FRUITCLAW_TELEGRAM_NOTIFY_COALESCE_MS
+	int "Telegram owner notification coalesce delay in milliseconds"
+	default 1500
+	range 0 10000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		After the first queued owner notification wakes the sender, wait
+		briefly for more lines so a burst of Berry replies and MCP tool
+		notices can be sent as one Telegram message.  This reduces expensive
+		TLS sendMessage calls while preserving owner visibility.
+
+config FRUITCLAW_TELEGRAM_NOTIFY_MAX_YIELD_MS
+	int "Telegram poll maximum notification yield in milliseconds"
+	default 5000
+	range 0 120000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Maximum time the Telegram poller yields to queued or in-flight
+		owner notifications before it runs another getUpdates request.
+		This keeps MCP tool-call notices visible without letting a slow or
+		stuck sendMessage request stop inbound Telegram polling forever.
+		Set to 0 only for profiles that want unbounded notification
+		priority over polling.
+
+config FRUITCLAW_TELEGRAM_MCP_YIELD_MS
+	int "Telegram notification MCP quiet window in milliseconds"
+	default 15000
+	range 0 120000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	depends on FRUITCLAW_MCP_SERVER
+	---help---
+		Owner notifications wait while MCP has been active recently, so
+		Telegram HTTPS sends do not steal the shared HTTP/TLS lane from a
+		burst of MCP tool calls.  Set to 0 to disable this courtesy wait.
+
+config FRUITCLAW_TELEGRAM_MCP_MAX_YIELD_MS
+	int "Telegram notification maximum MCP yield in milliseconds"
+	default 5000
+	range 0 120000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	depends on FRUITCLAW_MCP_SERVER
+	---help---
+		Maximum time one owner-notification batch may wait for MCP quiet.
+		This must stay finite when MCP clients poll status while waiting for
+		Telegram notifications; otherwise the status polling itself keeps
+		MCP recently active and the notification batch never sends.  Set to
+		0 only for profiles that want an unbounded MCP courtesy wait.
+
+config FRUITCLAW_TELEGRAM_HTTP_TIMEOUT_SEC
+	int "Telegram HTTPS request timeout in seconds"
+	default 20
+	range 4 120
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Webclient timeout used for Telegram getUpdates traffic.  This is
+		separate from the Telegram long-poll timeout; it covers DNS, TCP,
+		TLS, and HTTP transfer latency on the small ESP-Hosted network
+		stack.
+
+config FRUITCLAW_TELEGRAM_HTTP_GUARD_TIMEOUT_MS
+	int "Telegram HTTPS watchdog guard timeout in milliseconds"
+	default 45000
+	range 0 300000
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Watchdog guard for background Telegram polling.  The default keeps
+		the board recoverable when an HTTPS poll wedges while still giving
+		normal short long-poll failures room to unwind.  Set to 0 only when
+		a release-style profile wants to rely on the broader session,
+		operator, or max-uptime guards instead of per-poll recovery.
+
+config FRUITCLAW_ENABLE_DEEPSEEK
+	bool "Enable DeepSeek client"
+	default y
+
+config FRUITCLAW_DEEPSEEK_HTTP_TIMEOUT_SEC
+	int "DeepSeek HTTPS request timeout in seconds"
+	default 15
+	range 4 120
+	depends on FRUITCLAW_ENABLE_DEEPSEEK
+	---help---
+		Webclient timeout used for the DeepSeek chat/completions request.
+		Keep this comfortably shorter than FRUITCLAW_LLM_GUARD_TIMEOUT_MS
+		so ordinary TLS, DNS, or transfer failures return to the agent
+		before the watchdog recovery path is needed.
+
+config FRUITCLAW_ENABLE_SCHEDULER
+	bool "Enable scheduler"
+	default y
+
+config FRUITCLAW_ENABLE_BERRY
+	bool "Enable Berry capability"
+	default y if INTERPRETERS_BERRY
+	depends on INTERPRETERS_BERRY
+
+config FRUITCLAW_BERRY_TRACE
+	bool "Trace FruitClaw Berry runner stages"
+	default n
+	depends on FRUITCLAW_ENABLE_BERRY
+
+config FRUITCLAW_BERRY_EXPERIMENTAL_RUNNER
+	bool "Enable embedded Berry runner"
+	default y
+	depends on FRUITCLAW_ENABLE_BERRY
+	---help---
+		Enable the direct Berry VM wrapper used by berry.run_script and
+		fruitclaw berry-run.  FruitClaw runs the VM on a Berry-sized worker
+		stack and wraps execution with the FruitClaw watchdog guard so a
+		stuck script resets the board instead of wedging unattended
+		operation.  BOOTSEL conversion is controlled separately by
+		FRUITCLAW_GUARD_BOOTSEL_RECOVERY for temporary bring-up images.
+
+config FRUITCLAW_ENABLE_HTTP_TOOL
+	bool "Enable HTTP request tool"
+	default y
+
+config FRUITCLAW_ENABLE_GPIO_TOOL
+	bool "Enable GPIO tools"
+	default n
+
+config FRUITCLAW_ENABLE_TERMINAL_TOOL
+	bool "Enable owner-mode terminal command tool"
+	default y
+
+config FRUITCLAW_ENABLE_NEOPIXELS_TOOL
+	bool "Enable owner-mode NeoPixel tool"
+	default y
+
+config FRUITCLAW_ENABLE_DEVICE_TOOL
+	bool "Enable owner-mode /dev inspection tools"
+	default y
+
+config FRUITCLAW_ENABLE_EXEC_GUARD
+	bool "Enable watchdog guard around risky owner tools"
+	default y
+	depends on WATCHDOG && ARCH_CHIP_RP23XX
+	---help---
+		Arm the RP23xx watchdog while running risky owner-mode operations
+		such as Berry scripts and captured terminal commands.  If the
+		operation wedges, the watchdog resets the board.  Enable
+		FRUITCLAW_GUARD_BOOTSEL_RECOVERY only for supervised bring-up images
+		that should convert those watchdog resets into ROM BOOTSEL.
+
+config FRUITCLAW_ENABLE_SESSION_GUARD
+	bool "Enable long progress watchdog for unattended bring-up"
+	default y
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Keep the hardware watchdog alive only while FruitClaw reports
+		progress.  If the runtime goes stale during an unattended run, the
+		watchdog resets the board.  In normal operator/community images that
+		reset boots back into the app; BOOTSEL conversion is an explicit
+		bring-up option.
+
+config FRUITCLAW_GUARD_DEVPATH
+	string "FruitClaw execution watchdog path"
+	default "/dev/watchdog0"
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+
+config FRUITCLAW_GUARD_TIMEOUT_MS
+	int "FruitClaw execution guard timeout in milliseconds"
+	default 12000
+	range 1000 15000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+
+config FRUITCLAW_GUARD_ACQUIRE_TIMEOUT_MS
+	int "FruitClaw guard acquisition wait in milliseconds"
+	default 5000
+	range 0 60000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Maximum time a guarded operation waits for the single RP2350
+		hardware watchdog guard to become available.  Keep this short for
+		interactive MCP: a background Telegram notification should return a
+		busy error to the foreground tool rather than make Hermes or Codex
+		look hung while waiting behind an unrelated HTTP operation.
+
+config FRUITCLAW_GUARD_BOOTSEL_RECOVERY
+	bool "Convert FruitClaw watchdog guard resets to BOOTSEL"
+	default n
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	depends on ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+	---help---
+		Bring-up mode.  When enabled, FruitClaw writes the Fruit Jam
+		bootguard scratch magic before arming guarded watchdog paths, so a
+		wedged owner tool returns the board to ROM BOOTSEL for reflashing.
+		Leave this disabled for production-style watchdog resets back into
+		the application.
+
+config FRUITCLAW_SESSION_GUARD_TIMEOUT_MS
+	int "FruitClaw long progress watchdog timeout in milliseconds"
+	default 600000
+	range 60000 86400000
+	depends on FRUITCLAW_ENABLE_SESSION_GUARD
+
+config FRUITCLAW_SESSION_GUARD_HW_TIMEOUT_MS
+	int "FruitClaw session watchdog hardware feed timeout in milliseconds"
+	default 15000
+	range 12000 16000
+	depends on FRUITCLAW_ENABLE_SESSION_GUARD
+	---help---
+		Hardware watchdog timeout used by the always-on session feeder.
+		RP23xx hardware supports at most about 16.7 seconds.  The feeder runs
+		every two seconds; the longer software progress timeout above still
+		decides when FruitClaw is stale.
+
+config FRUITCLAW_OPERATOR_GUARD_TIMEOUT_MS
+	int "FruitClaw operator progress watchdog timeout in milliseconds"
+	default 90000
+	range 0 1800000
+	depends on FRUITCLAW_ENABLE_SESSION_GUARD
+	---help---
+		Progress guard for unattended operator testing.  When nonzero,
+		FruitClaw forces a watchdog reset if no operator-visible progress is
+		recorded for this long after runtime start.  Progress is recorded by
+		successful Telegram transport activity, MCP HTTP requests,
+		successful scheduler emits, and explicit status checks.  This
+		catches half-alive states where internal runtime heartbeats still
+		run but MCP, Telegram, Wi-Fi, or CDC access is dead.  BOOTSEL
+		conversion is only used when FRUITCLAW_GUARD_BOOTSEL_RECOVERY is
+		explicitly enabled.
+
+config FRUITCLAW_LLM_GUARD_TIMEOUT_MS
+	int "FruitClaw LLM call watchdog timeout in milliseconds"
+	default 60000
+	range 60000 86400000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Wrap DeepSeek calls in a kicked hardware watchdog.  The hardware
+		watchdog remains armed with FRUITCLAW_GUARD_TIMEOUT_MS and is
+		periodically kept alive until this long timeout expires.  If the
+		LLM/TLS path wedges past this limit, FruitClaw stops kicking the
+		watchdog and the board resets.
+
+config FRUITCLAW_AGENT_GUARD_TIMEOUT_MS
+	int "FruitClaw full agent turn watchdog timeout in milliseconds"
+	default 0
+	range 0 86400000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Wrap a complete Telegram/operator agent turn in one re-entrant
+		watchdog guard.  Inner DeepSeek, terminal, NeoPixel, device, and
+		Telegram-send guards become no-ops on the same worker thread while
+		this outer guard is active, closing the unguarded gaps between LLM
+		calls, JSON parsing, tool execution, and reply delivery.  Set this
+		to 0 when the profile should prefer narrower per-operation guards,
+		such as keeping DeepSeek bounded by FRUITCLAW_LLM_GUARD_TIMEOUT_MS
+		so MCP/webserver responsiveness is not hidden behind a long full-turn
+		agent deadline.
+
+config FRUITCLAW_HTTP_GUARD_TIMEOUT_MS
+	int "FruitClaw HTTP tool watchdog timeout in milliseconds"
+	default 90000
+	range 60000 86400000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Wrap Telegram HTTP polling/sending and similar network paths in a
+		kicked watchdog.  Normal long polling has room to complete, but a
+		wedged HTTP/TLS path eventually stops kicking the watchdog and
+		resets the board.
+
+config FRUITCLAW_CLI_GUARD_TIMEOUT_MS
+	int "FruitClaw local CLI watchdog timeout in milliseconds"
+	default 60000
+	range 15000 86400000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Wrap unguarded local CLI commands such as status/config/tools in a
+		kicked hardware watchdog.  If a local command or stale CDC path
+		wedges past this limit, FruitClaw stops kicking the watchdog and the
+		board resets.
+
+config FRUITCLAW_MAX_UPTIME_GUARD_MS
+	int "FruitClaw temporary max uptime before forced watchdog reset"
+	default 0
+	range 0 86400000
+	depends on FRUITCLAW_ENABLE_EXEC_GUARD
+	---help---
+		Optional blunt bring-up fuse: once FruitClaw initializes, start a
+		deadline thread that waits this long, then arms the watchdog and
+		intentionally lets the board reset.  Set to 0 to disable.  Normal
+		MCP/Telegram testing should leave this disabled and rely on the
+		session progress watchdog plus per-operation guards so a healthy
+		board is not reset merely because it has been online for a while.
+		BOOTSEL conversion is only used when
+		FRUITCLAW_GUARD_BOOTSEL_RECOVERY is explicitly enabled.
+
+config FRUITCLAW_ENABLE_SHELL_TOOL
+	bool "Enable legacy safe shell command alias"
+	default n
+	select FRUITCLAW_ENABLE_TERMINAL_TOOL
+
+config FRUITCLAW_TELEGRAM_BOT_TOKEN_PATH
+	string "Telegram bot token path"
+	default "/data/fruitclaw/secrets/telegram_token"
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+
+config FRUITCLAW_TELEGRAM_ALLOWED_CHAT_IDS_PATH
+	string "Telegram allowed chat IDs path"
+	default "/data/fruitclaw/telegram_allowed_chats.txt"
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+
+config FRUITCLAW_TELEGRAM_DEFAULT_ALLOWED_CHAT_ID
+	string "Default Telegram owner chat ID"
+	default "6216681418"
+	depends on FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Numeric Telegram chat ID written to telegram_allowed_chats.txt on
+		first FruitClaw data-root initialization.  This is a bring-up
+		convenience for the trusted owner chat; edit or clear the file on SD
+		to change the allowed chats.
+
+config FRUITCLAW_DEEPSEEK_API_KEY_PATH
+	string "DeepSeek API key path"
+	default "/data/fruitclaw/secrets/deepseek_api_key"
+	depends on FRUITCLAW_ENABLE_DEEPSEEK
+
+config FRUITCLAW_DEEPSEEK_ENDPOINT
+	string "DeepSeek OpenAI-compatible endpoint"
+	default "https://api.deepseek.com/chat/completions"
+	depends on FRUITCLAW_ENABLE_DEEPSEEK
+
+config FRUITCLAW_DEEPSEEK_MODEL
+	string "DeepSeek model"
+	default "deepseek-chat"
+	depends on FRUITCLAW_ENABLE_DEEPSEEK
+
+config FRUITCLAW_HTTP_ALLOWLIST_PATH
+	string "HTTP allowlist path"
+	default "/data/fruitclaw/http_allowlist.txt"
+
+config FRUITCLAW_MCP_SERVER
+	bool "Enable FruitClaw MCP Streamable HTTP endpoint"
+	default n
+	depends on NETUTILS_WEBSERVER && NETUTILS_HTTPD_CGIPATH
+	depends on NETUTILS_HTTPD_POST && NETUTILS_CJSON
+	---help---
+		Register a minimal MCP JSON-RPC endpoint at /mcp on the existing
+		uIP webserver.  This is an adapter over the FruitClaw capability
+		registry, not a second tool registry or second TCP server.
+
+config FRUITCLAW_MCP_YOLO_MODE
+	bool "Run MCP endpoint in trusted owner YOLO mode"
+	default y
+	depends on FRUITCLAW_MCP_SERVER
+	---help---
+		Do not require bearer auth or origin checks.  MCP tool calls run
+		with owner_mode=true.  This is intentionally dangerous and intended
+		for trusted local bring-up only.
+
+config FRUITCLAW_MCP_MAX_RESPONSE
+	int "Maximum MCP JSON response bytes"
+	default 32768
+	depends on FRUITCLAW_MCP_SERVER
+	---help---
+		Upper bound for MCP JSON responses, including tools/list.  Owner
+		mode exposes a broad tool surface, so the Fruit Jam operator
+		profile uses a larger but still bounded response buffer.
+
+config FRUITCLAW_MCP_TOOL_TIMEOUT_MS
+	int "Maximum time MCP waits for a tool call in milliseconds"
+	default 30000
+	range 5000 300000
+	depends on FRUITCLAW_MCP_SERVER
+	---help---
+		Bound the HTTP request worker while executing a FruitClaw tool.
+		If a tool wedges in a device, filesystem, or runtime path, MCP
+		returns a timeout error instead of pinning the webserver thread
+		forever.  The abandoned tool remains covered by its normal
+		FruitClaw watchdog guard and should still reset the board if it
+		does not unwind.  BOOTSEL conversion is optional bring-up behavior.
+
+config FRUITCLAW_MCP_NOTIFY_STATUS_INTERVAL_MS
+	int "Minimum interval between MCP system.status Telegram notices"
+	default 300000
+	range 0 3600000
+	depends on FRUITCLAW_MCP_SERVER && FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Rate-limit owner Telegram notifications for successful MCP
+		system.status calls.  Status probes are commonly used by soak and
+		monitoring tools, so announcing every successful probe makes the
+		Telegram operator chat hard to use.  Errors still notify
+		immediately.  Set to 0 to suppress successful system.status notices
+		entirely while keeping all other MCP tool notices enabled.
+
+config FRUITCLAW_MCP_NOTIFY_TOOL_INTERVAL_MS
+	int "Minimum interval between MCP tool Telegram notices"
+	default 10000
+	range 0 3600000
+	depends on FRUITCLAW_MCP_SERVER && FRUITCLAW_ENABLE_TELEGRAM
+	---help---
+		Rate-limit owner Telegram notifications for successful MCP tool
+		calls other than system.status.  Keep this short enough that
+		human-driven MCP operations are visible in Telegram, but long
+		enough that automated MCP clients do not flood the chat.  Set to
+		0 to suppress successful non-status MCP tool notices.
+
+endif # SYSTEM_FRUITCLAW

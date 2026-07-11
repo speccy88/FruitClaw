@@ -1,521 +1,154 @@
-# FruitClaw
+# NuttX RP2350
 
-FruitClaw is an Apache NuttX release workspace for the Adafruit Fruit Jam
-RP2350. The production operator image turns the board into a small owner-mode
-NuttX node with USB NSH, ESP-Hosted Wi-Fi, a Water.css documentation site,
-YOLO MCP, Telegram/DeepSeek agent plumbing, Berry scripting, LVGL/Berry
-bindings, NeoPixels, scheduler tools, Telnet/FTP service control, USB
-keyboard/mouse/Xbox input, and watchdog recovery.
+NuttX RP2350 is a thin, reproducible integration repository for two RP2350
+boards:
 
-This repository is a wrapper around the real Apache upstream repositories plus
-a small FruitClaw patch layer. A clean clone should not need the old personal
-`FruitClaw-nuttx` or `FruitClaw-apps` forks:
+- Adafruit Fruit Jam (`RP2350B`, PSRAM, ESP32-C6 ESP-Hosted networking)
+- Raspberry Pi Pico 2 W (`RP2350A`, no PSRAM, Infineon CYW43439 networking)
 
-- `nuttx`: `https://github.com/apache/nuttx.git`
-- `apps`: `https://github.com/apache/nuttx-apps.git`
-- FruitClaw patch set:
-  - `patches/nuttx/0001-fruitclaw-nuttx.patch`
-  - `patches/apps/0001-fruitclaw-apps.patch`
+The repository does not vendor Apache NuttX source trees.  `nuttx/` and
+`apps/` are immutable submodule pins to `apache/nuttx` and
+`apache/nuttx-apps`.  Project changes live in ordered patch stacks,
+project-owned overlays, and eight independent profile defconfigs.
 
-## Current Production Release
+FruitClaw remains the name of the optional operator application in the
+`fruit-jam-full-fruitclaw` profile; it is no longer the project name.
 
-The current FruitClaw operator UF2 is:
+## Repository model
 
 ```text
-artifacts/fruitclaw-operator-upstream-backup-20260706.uf2
+nuttx/ and apps/              clean pinned Apache submodules
+patches/{nuttx,apps}/series   ordered modifications to upstream files
+overlays/{nuttx,apps}/        project-owned boards, drivers, and apps
+profiles/manifest.json        canonical eight-profile release matrix
+profiles/<id>/defconfig       complete independent NuttX configurations
+sources.lock.json             source, dependency, toolchain, and image pins
+build/                        ignored per-profile staging trees
+dist/                         ignored build and release output
 ```
 
-SHA-256:
+Builds never configure or patch the checked-out submodules.  Each profile is
+materialized from the exact locked commits into `build/work/<profile>/`, then
+patched, overlaid, configured, and built there.  A normal build therefore
+leaves `git status` clean.
 
-```text
-164adacbd3a29b110d895659805c92750ba1848760e71efcba9b406bd9fb12d7
-```
+## Release profiles
 
-It is built from:
-
-```text
-nuttx upstream base: a923e4a714d55a4963c0bd68d90a1bb936d200f8
-apps upstream base:  4c560ef0a202aa00657e67f4572aee0ed071bd0f
-nuttx patch source:  1792728c42e4 FruitClaw fork snapshot plus local hardening
-apps patch source:   28c08cb14a7c FruitClaw fork snapshot plus local hardening
-profile:             adafruit-fruit-jam-rp2350:esp-hosted
-```
-
-Build size from `arm-none-eabi-size nuttx/nuttx`:
-
-```text
-text=1199116  data=272  bss=215380  total=1414768 bytes
-```
-
-Linker memory report:
-
-```text
-FLASH: 1199388 B / 16 MB
-RAM:    250980 B / 512 KB
-```
-
-Validation for this production release:
-
-- Built with `PATH=$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH` and
-  `make -C nuttx -j8` after configuring the `esp-hosted` profile.
-- `nuttx/nuttx.uf2` from a clean Apache-plus-patches rebuild matches the
-  release asset byte for byte.
-- The release profile disables the development max-uptime BOOTSEL fuse.
-- Guarded runtime failures use watchdog reset back into NuttX/FruitClaw.
-- `device.read` rejects raw block devices before opening them, so MCP/Telegram
-  cannot wedge the board by reading `/dev/mmcsd0`.
-
-## Current Source Pins
-
-The wrapper source has been refreshed onto current Apache `master` after the
-production UF2 above was built. The release artifact provenance above remains
-the source of truth for that UF2; rebuild before tagging a new UF2 release.
-
-Current Apache submodule pins:
-
-```text
-nuttx: f27749b1b7339676bde10ec6852c9a7082fbaee3
-apps:  c785d40af7b354a5ee312ad41e174e07875866da
-```
-
-The FruitClaw patch layer applies cleanly to those pins.
-
-## Production Behavior
-
-FruitClaw is intentionally an owner-mode operator image, not a locked-down
-consumer appliance.
-
-- MCP is YOLO owner mode: no bearer token, no read-only policy layer, and MCP
-  calls run with `owner_mode=true`.
-- Local CLI and allowlisted Telegram chats are owner-capable by design.
-- Watchdog guards stay enabled for risky operations.
-- The development max-uptime timer is off:
-  `CONFIG_FRUITCLAW_MAX_UPTIME_GUARD_MS=0`.
-- Automatic BOOTSEL recovery is off:
-  `# CONFIG_FRUITCLAW_GUARD_BOOTSEL_RECOVERY is not set`.
-- A guarded hang should reset back into the FruitClaw app. Use the `bootsel`
-  command only when you intentionally want ROM BOOTSEL for flashing.
-- Secrets are runtime files only. Do not put Wi-Fi, Telegram, DeepSeek, or other
-  tokens in source, defconfig, README examples, or release notes.
-- TRMNL is not enabled in this FruitClaw image. TRMNL source/configs live in
-  the tree for the separate display-client work, but `CONFIG_SYSTEM_TRMNL` is
-  off here.
-
-## Flash The Release UF2
-
-With the board in BOOTSEL:
-
-```sh
-picotool load -x artifacts/fruitclaw-operator-upstream-backup-20260706.uf2
-```
-
-Or flash a local build:
-
-```sh
-picotool load -x nuttx/nuttx.uf2
-```
-
-Open the USB console:
-
-```sh
-ls /dev/cu.usbmodem*
-screen /dev/cu.usbmodem01 115200
-# or: tio /dev/cu.usbmodem01
-```
-
-The production profile leaves NSH echoback enabled, so a default terminal
-session should show typed characters and clean line returns. If an older alpha
-image hides typing or repeats prompts on one line, rebuild with
-`CONFIG_NSH_DISABLE_ECHOBACK` unset.
-
-Useful first commands:
-
-```sh
-uname -a
-fruitclaw status
-fruitclaw selftest
-dvictrl info
-help
-```
-
-## Use The Board
-
-The release autostarts `fruitclaw boot` from `rcS`. You can also run the main
-foreground service manually:
-
-```sh
-fruitclaw start
-```
-
-The most useful status commands are:
-
-```sh
-fruitclaw status
-fruitclaw config
-fruitclaw tools
-fruitclaw mcp status
-fruitclaw service status
-```
-
-The default web page is:
-
-```text
-http://<board-ip>/
-```
-
-It is a small Water.css page whose Markdown body can be edited from the
-FruitClaw data root or through the `web.home.write` MCP/agent tool.
-
-The full browser manual is:
-
-```text
-http://<board-ip>/docs/
-```
-
-The `/docs/` manual is also Water.css themed. It is split into small Markdown
-pages so the microcontroller only serves static files and the browser renders
-Markdown client-side with Marked and DOMPurify. `/doc/` is kept as a small
-compatibility redirect.
-
-The MCP endpoint is:
-
-```text
-POST http://<board-ip>/mcp
-```
-
-Minimal MCP check:
-
-```sh
-curl -i http://<board-ip>/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
-```
-
-Expected response:
-
-```json
-{"jsonrpc":"2.0","id":1,"result":{}}
-```
-
-## Configure Wi-Fi And Secrets
-
-Do not commit real credentials. Enter them on the board:
-
-```sh
-fruitclaw config set-wifi "<ssid>" "<password>"
-fruitclaw config set-secret telegram "<telegram-bot-token>"
-fruitclaw config set-secret deepseek "<deepseek-api-key>"
-```
-
-If no values are passed, the commands prompt on the serial console:
-
-```sh
-fruitclaw config set-wifi
-fruitclaw config set-secret telegram
-fruitclaw config set-secret deepseek
-```
-
-Check the result without printing secret values:
-
-```sh
-fruitclaw config
-fruitclaw wifi-up
-ifconfig wlan0
-ping -c 3 1.1.1.1
-```
-
-On boot, FruitClaw looks for Wi-Fi credentials in this order:
-
-```text
-CONFIG_FRUITCLAW_WIFI_CONFIG_PATH, when set to an absolute path
-<active-data-root>/wifi.conf
-/mnt/sd0/fruitclaw/wifi.conf
-/data/fruitclaw/wifi.conf
-```
-
-The profile seeds the known owner chat ID into `telegram_allowed_chats.txt` on
-first data-root initialization. To discover or change the allowlist:
-
-```sh
-fruitclaw telegram-discover
-cat /data/fruitclaw/telegram_allowed_chats.txt
-echo "<numeric-chat-id>" > /data/fruitclaw/telegram_allowed_chats.txt
-```
-
-Use `/mnt/sd0/fruitclaw/...` instead of `/data/fruitclaw/...` when SD is the
-active data root.
-
-## Runtime Storage
-
-FruitClaw prefers SD storage when mounted and writable, and falls back to tmpfs
-when SD is absent or unhealthy:
-
-```text
-/mnt/sd0/fruitclaw
-/data/fruitclaw
-```
-
-Typical runtime files:
-
-```text
-system.md
-user.md
-memory.jsonl
-schedules.json
-router_rules.json
-telegram_offset
-telegram_allowed_chats.txt
-wifi.conf
-http_allowlist.txt
-certs/roots.pem
-sessions/
-scripts/
-secrets/
-services/
-www/home.md
-```
-
-The root web page serves `/site/home.md`, backed by `www/home.md` in the active
-data root. The default page appears if that file is absent.
-
-## Installed User-Facing Features
-
-The `adafruit-fruit-jam-rp2350:esp-hosted` production profile enables:
-
-- `fruitclaw`: operator agent CLI, boot supervisor, MCP route, Telegram/DeepSeek
-  hooks, scheduler, memory, sessions, Berry wrapper, service control, web-home
-  tools, and hardware tools.
-- uIP webserver on port 80 with a customizable Water.css home page and static
-  Water.css Markdown docs under `/docs/`.
-- MCP Streamable HTTP endpoint at `/mcp`.
-- Telnet server (`telnetd`) and FTP server (`ftpd_start`/`ftpd_stop`) with
-  FruitClaw service supervisor support.
-- Berry interpreter plus FruitClaw Berry runner and LVGL bindings.
-- LVGL 9.2.2 app support and example Berry LVGL scripts in board ROMFS.
-- USB host for keyboard, mouse, hub, composite devices, and Xbox controller.
-- `vi`, `cgol` Conway's Game of Life, `rtttl`, `neopixels`, `dvictrl`,
-  `piousbhost`, `wapi`, `renew`, `ping`, `wget`, `ntpc`, `i2c`, `spi`, and NSH.
-- NeoPixels on `/dev/leds0`.
-- Device tools for bounded non-block `/dev` access. Raw block devices such as
-  `/dev/mmcsd*`, `/dev/ram*`, `/dev/mtd*`, and `/dev/smart*` are denied.
-
-The running board is the source of truth:
-
-```sh
-fruitclaw status
-fruitclaw tools
-help
-```
-
-## Tool Examples
-
-Local CLI:
-
-```sh
-fruitclaw terminal-run uname -a
-fruitclaw terminal-run ls /dev
-fruitclaw neopixels blue
-fruitclaw neopixels off
-fruitclaw service start ftpd
-fruitclaw service start telnetd
-fruitclaw schedule list
-fruitclaw berry-run hello.be
-```
-
-MCP tools include `system.status`, `system.info`, `time.now`, `terminal.run`,
-`device.list`, `device.read`, `device.write`, `neopixels.set`,
-`neopixels.effect`, `scheduler.add`, `scheduler.list`, `scheduler.remove`,
-`telegram.send_message`, `berry.run_script`, `script.write`, `script.run`,
-`web.home.read`, and `web.home.write`.
-
-Telegram is text-only in this release. Inbound Telegram messages are accepted
-only from numeric chat IDs listed in `telegram_allowed_chats.txt`.
-
-## Display Profile
-
-FruitClaw uses the safe color DVI profile, not the TRMNL 800x480 grayscale
-profile:
-
-```text
-CONFIG_RP23XX_HSTX_DVI_FB_RGB565_320X240=y
-# CONFIG_RP23XX_HSTX_DVI_FB_Y2_800X480 is not set
-CONFIG_RP23XX_HSTX_DVI_PIXEL_CLOCK=25200000
-CONFIG_RP23XX_HSTX_DVI_SCANOUT_PSRAM=y
-```
-
-The 25.2 MHz DVI pixel clock and PSRAM scanout setting come from the
-TRMNL/HSTX bring-up notes, but this operator build stays on the reliable
-320x240 RGB565 path for LVGL, CGOL, and general board work.
-
-TRMNL-specific timing notes are in:
-
-```text
-nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/TRMNL_DVI_TIMING.md
-```
-
-## ESP32-C6 ESP-Hosted Firmware
-
-FruitClaw Wi-Fi expects the Fruit Jam ESP32-C6 to run ESP-Hosted-MCU, not the
-stock NINA/AirLift firmware.
-
-The last published ESP-Hosted release assets are:
-
-| File | Purpose | SHA-256 |
+| Profile | Board | Purpose |
 | --- | --- | --- |
-| `artifacts/fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin` | ESP32-C6 ESP-Hosted-MCU merged flash image. | `1a1b35659dd62f44fa8c91b3e03f3fec80886072d04aeb6f192823eb28921c08` |
-| `artifacts/fruitclaw-esp-hosted-wlan0-20260629.uf2` | Earlier RP2350 NuttX ESP-Hosted host image. | `c2ccb00bed4b264fd60c389ee6c3125827ea4ef4188a120b233a195a7d8ce615` |
+| `fruit-jam-minimal` | Fruit Jam | USB CDC NSH, Berry, vi, readline/history, Ctrl+C, I2C, watchdog; no network or PSRAM |
+| `pico-2-w-minimal` | Pico 2 W | Same minimum contract on RP2350A |
+| `fruit-jam-network` | Fruit Jam | Minimum plus ESP32-C6 ESP-Hosted `wlan0` and low-footprint network services |
+| `pico-2-w-network` | Pico 2 W | Minimum plus Infineon CYW43439 `wlan0` and the same services |
+| `fruit-jam-trmnl` | Fruit Jam | Working TRMNL client, ESP-Hosted, PSRAM, and 800x480 Y2 DVI output |
+| `fruit-jam-doom` | Fruit Jam | Focused NXDoom image with PSRAM, DVI, SD, USB keyboard/mouse, and I2S audio |
+| `fruit-jam-full` | Fruit Jam | Network plus the complete Fruit Jam driver and utility surface |
+| `fruit-jam-full-fruitclaw` | Fruit Jam | Full image plus FruitClaw boot autostart |
 
-The ESP32-C6 image was built from upstream `espressif/esp-hosted-mcu` commit:
+Network profiles include DHCP, DNS, `ifconfig`, `wapi`, `renew`, ping, wget,
+NTP, netcat, telnet client/server, FTP client/server, and lightweight HTTPD.
+Wi-Fi credentials are runtime data and must never be stored in defconfigs.
 
-```text
-8f0770d39065c2a9ff6828268709c3502e0d5349
-```
+The Pico 2 W USB console baseline has been exercised on hardware.  Pico 2 W
+Wi-Fi/services and NXDoom mouse/audio remain explicit hardware-validation
+milestones; their presence in the build matrix is not a claim that those live
+tests are complete.
 
-with the Fruit Jam overlay at:
+## Build
 
-```text
-nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/esp-hosted-mcu/
-```
-
-Why ESP-Hosted: the stock NINA/AirLift model makes the coprocessor own the
-socket stack. ESP-Hosted makes the ESP32-C6 a Wi-Fi radio/data coprocessor so
-NuttX owns DHCP, DNS, sockets, services, diagnostics, and `wlan0`.
-
-To flash the ESP32-C6, temporarily flash Adafruit's SerialESPPassthrough UF2 to
-the RP2350, then use `esptool`:
-
-```sh
-python3 -m esptool --chip esp32c6 --before no_reset --after no_reset \
-  -p /dev/cu.usbmodem<PASSTHROUGH> -b 115200 \
-  write_flash 0 fruitclaw-esp32c6-esp-hosted-mcu-20260629.bin
-```
-
-Then put the RP2350 back into BOOTSEL and flash the FruitClaw UF2.
-
-To revert the coprocessor, follow Adafruit's AirLift firmware guide and flash
-the current `NINA_ADAFRUIT-fruitjam_c6-<version>.bin`.
-
-## Clone The Source
-
-Use recursive submodules, then apply the FruitClaw patch layer:
+Prerequisites are Git, Python 3, an Arm GNU toolchain, NuttX
+`kconfig-frontends`, and `genromfs`.  Docker can provide the canonical release
+environment.
 
 ```sh
-git clone --recurse-submodules https://github.com/speccy88/FruitClaw.git
-cd FruitClaw
-scripts/apply-fruitclaw-patches.sh
+git clone --recurse-submodules \
+  https://github.com/speccy88/NuttX-RP2350.git
+cd NuttX-RP2350
+./scripts/bootstrap.sh
+./scripts/build-profile.sh fruit-jam-minimal
 ```
 
-If the checkout already exists:
+Build every release profile:
 
 ```sh
-git submodule update --init --recursive
-scripts/apply-fruitclaw-patches.sh
+./scripts/build-all.sh
 ```
 
-The submodules are pinned to Apache upstream commits. Do not pull the old fork
-remotes when trying to reproduce this release; the custom FruitClaw changes are
-tracked in `patches/`.
+The profile manifest is the sole release matrix.  Do not duplicate profile
+lists in scripts or workflows.
 
-## Build The Production UF2
+## Flash and connected testing
 
-Native macOS/Linux build:
+Release images retain intentional recovery commands:
+
+- NSH `bootsel`
+- 1200-baud USB CDC BOOTSEL touch
+- host-driven `picotool reboot -u -f`
+
+Automatic watchdog-to-BOOTSEL recovery is forbidden in canonical release
+defconfigs.  Release watchdog expiry performs a normal reset back into NuttX.
 
 ```sh
-scripts/build-fruitclaw.sh
+./scripts/flash-profile.sh fruit-jam-minimal
+./scripts/test-profile.sh fruit-jam-minimal
 ```
 
-The generated UF2 is:
-
-```text
-nuttx/nuttx.uf2
-```
-
-After Kconfig or defconfig changes:
+Connected test runs use a generated development-only override:
 
 ```sh
-export PATH="$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH"
-cd nuttx
-make olddefconfig
-make -j8
+./scripts/build-profile.sh fruit-jam-minimal --dev-bootsel
 ```
 
-Manual equivalent:
+The override enables BOOTSEL recovery and a ten-minute BOOTSEL backstop only
+inside the ignored staging tree.  Test tooling always attempts to return the
+board to BOOTSEL before exiting and confirms that state with
+`picotool info -a`.
+
+## Releases
+
+Release tags use SemVer.  Until the hardware matrix is complete, publish only
+prereleases such as `v0.1.0-rc.1`.
+
+Pushing a tag starts `.github/workflows/release.yml`; it performs two clean
+digest-pinned container builds, compares each UF2 byte for byte, packages the
+complete matrix, and creates the prerelease only if every asset is present.
 
 ```sh
-scripts/apply-fruitclaw-patches.sh
-export PATH="$HOME/.local/nuttx-tools/kconfig-frontends/bin:$PATH"
-cd nuttx
-./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:esp-hosted
-make -j8
+git tag v0.1.0-rc.1
+git push origin v0.1.0-rc.1
 ```
 
-## Docker Incremental Builds
+Every release is atomic: eight RP2350 UF2s, the matching ESP32-C6
+ESP-Hosted-MCU binary, `SHA256SUMS.txt`, and `build-manifest.json`.  A missing
+profile fails the release; assets under an existing tag are never replaced.
 
-The helper below is for a warm Docker build tree. It avoids rebuilding the
-whole world when only FruitClaw-relevant paths changed:
+The manifest records both Apache pins, wrapper/tag SHA, profile and patch
+hashes, toolchain and container identity, ESP-Hosted-MCU pin, sizes, and
+SHA-256 values.
+
+## Updating Apache upstreams
+
+Pins never float during builds.  Test candidate commits explicitly:
 
 ```sh
-scripts/apply-fruitclaw-patches.sh
-scripts/fruitclaw_docker_incremental.sh --configure
-scripts/fruitclaw_docker_incremental.sh
+./scripts/update-upstreams.sh \
+  --nuttx f27749b1b7339676bde10ec6852c9a7082fbaee3 \
+  --apps c785d40af7b354a5ee312ad41e174e07875866da
 ```
 
-The helper expects a warm tree at `/tmp/fruitclaw-docker-build` by default and
-uses `ghcr.io/apache/nuttx/apache-nuttx-ci-linux:latest` unless
-`FC_DOCKER_IMAGE` is set. It copies the warm result to:
+The update is accepted only if both ordered patch stacks apply, all profile
+policies pass, and all eight isolated builds succeed.  Gitlinks and
+`sources.lock.json` must move together in one reviewed change.
 
-```text
-artifacts/fruitclaw-esp-hosted-docker-latest.uf2
-```
+## Project documentation
 
-## Documentation Locations
+- `docs/FRUITCLAW_WIFI_RELIABILITY.md` records FruitClaw/ESP-Hosted reliability work.
+- `docs/FRUITCLAW_ISSUES.md` records known FruitClaw component issues.
+- Board-specific documentation is installed through `overlays/nuttx/`.
+- Historical FruitClaw tags and releases remain available after the repository rename.
 
-More detail lives in the source tree and on the board:
+## License
 
-- Browser home page served at `/`:
-  `apps/examples/webserver/httpd-fs/index.html`
-- Browser manual served at `/docs/`:
-  `apps/examples/webserver/httpd-fs/docs/`
-- Legacy `/doc/` compatibility redirect:
-  `apps/examples/webserver/httpd-fs/doc/index.html`
-- FruitClaw app manual:
-  `apps/system/fruitclaw/README.md`
-- Fruit Jam board notes:
-  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/README.md`
-- PSRAM notes:
-  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/PSRAM.md`
-- TRMNL/HSTX timing notes:
-  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/TRMNL_DVI_TIMING.md`
-- ESP-Hosted board notes:
-  `nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/ESP_HOSTED.md`
-
-## Patch Maintenance
-
-The wrapper repo intentionally stores only:
-
-- Apache upstream submodule pins.
-- FruitClaw patch files under `patches/`.
-- Build/flash helper scripts.
-- Release artifacts and checksums.
-
-The patch files were exported from the local FruitClaw bring-up trees, but they
-exclude generated build products, Finder duplicate files, the old NXDoom import,
-and the separate TRMNL app. Keep real Wi-Fi, Telegram, DeepSeek, TRMNL, or other
-tokens out of patches, docs, defconfigs, release notes, and artifacts.
-
-When refreshing the patch layer, start from the current working FruitClaw trees,
-export against the Apache submodule pins recorded by the wrapper commit, and
-rerun `scripts/apply-fruitclaw-patches.sh` in a fresh clone before trusting the
-backup.
-
-## Known Release Boundaries
-
-- Telegram and DeepSeek need runtime credentials before end-to-end chat works.
-- TLS is allowed unverified for bring-up unless CA roots are installed.
-- SD must be mounted for persistent `/mnt/sd0/fruitclaw`; otherwise the board
-  falls back to `/data/fruitclaw`.
-- MCP is intentionally dangerous YOLO mode in this release.
-- Local graphical UI polish is still future work; the current web UI is static
-  docs plus the editable root page, and the board display profile is the safe
-  320x240 RGB565 DVI mode.
+Project patches and overlays follow the license headers of their respective
+Apache NuttX, Apache NuttX Apps, Berry, NXDoom, and component sources.  See
+the source files and upstream projects for details.

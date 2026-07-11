@@ -1,0 +1,82 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_PIOUSBHOST
+	tristate "'piousbhost' command"
+	default n
+	depends on RP23XX_PIO_USBHOST && USBHOST_WAITER
+	---help---
+		Enable a command that explicitly starts the RP23XX PIO USB host
+		controller and the NuttX USB host waiter.
+
+if SYSTEM_PIOUSBHOST
+
+config SYSTEM_PIOUSBHOST_PROGNAME
+	string "Program name"
+	default "piousbhost"
+
+config SYSTEM_PIOUSBHOST_PRIORITY
+	int "piousbhost task priority"
+	default 100
+
+config SYSTEM_PIOUSBHOST_STACKSIZE
+	int "piousbhost stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_PIOUSBHOST_GUARD_REFRESH_MS
+	int "Boot guard refresh interval milliseconds"
+	default 2000
+	range 250 30000
+	depends on ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+	---help---
+		Interval used by piousbhost start-guarded to refresh the Fruit Jam
+		boot guard while USB host startup is still in progress.
+
+config SYSTEM_PIOUSBHOST_GUARD_WINDOW_MS
+	int "Boot guard startup window milliseconds"
+	default 60000
+	range 1000 300000
+	depends on ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+	---help---
+		Maximum time piousbhost start-guarded keeps refreshing the Fruit Jam
+		boot guard before allowing the watchdog to recover the board.
+
+config SYSTEM_PIOUSBHOST_EXPECT_KEYBOARDS
+	int "Expected HID keyboards"
+	default 0
+	range 0 26
+	---help---
+		Number of raw HID keyboard nodes that piousbhost waits for during
+		startup.  Leave this at zero for generic setups; set it for boards
+		with a known attached keyboard configuration.
+
+config SYSTEM_PIOUSBHOST_EXPECT_MICE
+	int "Expected HID mice"
+	default 0
+	range 0 26
+	---help---
+		Number of HID mouse nodes that piousbhost waits for during startup.
+		Leave this at zero for generic setups; set it for boards with a
+		known attached mouse configuration.
+
+config SYSTEM_PIOUSBHOST_HID_WAIT_SEC
+	int "HID startup wait seconds"
+	default 12
+	range 0 300
+	---help---
+		Maximum time piousbhost waits for the configured expected HID
+		keyboard and mouse nodes after hub startup scans.
+
+config SYSTEM_PIOUSBHOST_HUB_SETTLE_SEC
+	int "Hub startup settle seconds"
+	default 16
+	range 0 300
+	---help---
+		Maximum time piousbhost waits for connected downstream hub ports
+		to become enabled after startup scans.  This gives receivers that
+		need an extra reset pass time to enumerate before the command
+		returns to NSH.
+
+endif

@@ -1,0 +1,174 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+if ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
+
+config ADAFRUIT_FRUIT_JAM_RP2350_NINA
+	bool "Enable onboard ESP32-C6 NINA wiring"
+	default n
+	---help---
+		Enable this later when the board port grows the ESP32-C6/NINA
+		networking path.  The first bring-up keeps networking disabled.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+	bool "Enable ESP-Hosted ESP32-C6 support"
+	default n
+	depends on ESP_HOSTED_SPI && RP23XX_SPI1
+	select ADAFRUIT_FRUIT_JAM_RP2350_NINA
+	---help---
+		Build support for using the onboard ESP32-C6 pins as an
+		ESP-Hosted-MCU style Wi-Fi coprocessor over SPI1.  This is the
+		raw-frame hosted path intended to become a true wlan0 NuttX network
+		interface, not the Adafruit NINA socket-command protocol.
+
+if ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+
+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
+	bool "Automatically start ESP-Hosted during board bring-up"
+	default n
+	---help---
+		Start the ESP-Hosted SPI transport from board bring-up.  Keep this
+		disabled while validating the coprocessor firmware and SPI handshake
+		so USB CDC/NSH remains available for recovery.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_START_DELAY_MS
+	int "ESP-Hosted deferred start delay in milliseconds"
+	default 2500
+	depends on ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
+	---help---
+		Delay ESP-Hosted initialization so USB CDC/NSH can become
+		interactive before the ESP32-C6 SPI control path starts.  This
+		keeps the recovery shell available during coprocessor bring-up.
+
+endif
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_DIAG
+	bool "Enable early GPIO29 boot diagnostic"
+	default n
+	---help---
+		Drive the active-low red LED as soon as the board-specific early
+		initialization hook runs.  This is useful while bringing up USB
+		console images that may fail before a serial console is available.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+	bool "Enable diagnostic BOOTSEL recovery guard"
+	default n
+	depends on BOARDCTL_RESET
+	select SCHED_HPWORK
+	select WATCHDOG
+	---help---
+		Arm the RP23xx watchdog and a delayed BOOTSEL recovery worker early
+		in board start-up.  This is intended for unattended bring-up images:
+		if the image hangs before NSH is reachable, the next watchdog reset
+		enters BOOTSEL instead of endlessly rebooting the same image.  When
+		USB CDC/ACM minor 0 is configured by the host, the board disarms the
+		guard automatically.
+
+if ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD_TIMEOUT_MS
+	int "Diagnostic BOOTSEL recovery timeout in milliseconds"
+	default 15000
+	range 1000 600000
+	---help---
+		Diagnostic recovery guard deadline.  The RP23xx watchdog hardware
+		can only hold about 16 seconds at a time; the board guard refreshes
+		that short watchdog from HPWORK until this longer deadline expires.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD_CDC_DISARM
+	bool "Disarm BOOTSEL recovery guard when CDC connects"
+	default y
+	depends on CDCACM
+	---help---
+		Automatically clear the early BOOTSEL recovery guard when USB CDC/ACM
+		minor 0 is configured by the host.  This is convenient for plain NSH
+		bring-up images where an interactive console is the success signal.
+		Disable this for unattended FruitClaw operator images: a stale CDC
+		device is not enough proof that the agent, Wi-Fi, HTTPD, Telegram, or
+		watchdog keepalive path is healthy.
+
+endif
+
+config ADAFRUIT_FRUIT_JAM_RP2350_IR_RX
+	bool "Enable GPIO29 IR receiver"
+	default n
+	depends on DRIVERS_RC
+	---help---
+		Register the Fruit Jam GPIO29 shared LED/IR pin as a raw LIRC
+		receiver at /dev/lirc0.  Enable this instead of USERLED support
+		when the IR receiver should own the pin.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS
+	bool "Mount baked example scripts at /examples"
+	default n
+	depends on !DISABLE_MOUNTPOINT
+	select FS_ROMFS
+	---help---
+		Mount a board-local ROMFS image containing Fruit Jam helper
+		scripts and demonstrations at /examples.
+
+if ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS
+
+config RP23XX_ROMFS_ROMDISK_MINOR
+	int "ROMFS RAM disk minor"
+	default 0
+
+config RP23XX_ROMFS_ROMDISK_DEVNAME
+	string "ROMFS RAM disk device name"
+	default "/dev/ram0"
+
+config RP23XX_ROMFS_ROMDISK_SECTSIZE
+	int "ROMFS RAM disk sector size"
+	default 512
+
+config RP23XX_ROMFS_MOUNT_MOUNTPOINT
+	string "ROMFS mount point"
+	default "/examples"
+
+endif
+
+config RP23XX_WS2812_GPIO_PIN
+	default 32 if RP23XX_BOARD_HAS_WS2812
+
+config RP23XX_WS2812_PWR_GPIO
+	default -1 if RP23XX_BOARD_HAS_WS2812
+
+config WS2812_LED_COUNT
+	default 5 if RP23XX_BOARD_HAS_WS2812
+
+config RP23XX_I2C0_SDA_GPIO
+	default 20 if RP23XX_I2C0
+
+config RP23XX_I2C0_SCL_GPIO
+	default 21 if RP23XX_I2C0
+
+config RP23XX_SPI0_RX_GPIO
+	default 36 if RP23XX_SPI0
+
+config RP23XX_SPI0_CS_GPIO
+	default 39 if RP23XX_SPI0
+
+config RP23XX_SPI0_SCK_GPIO
+	default 34 if RP23XX_SPI0
+
+config RP23XX_SPI0_TX_GPIO
+	default 35 if RP23XX_SPI0
+
+config RP23XX_SPI1_RX_GPIO
+	default 28 if RP23XX_SPI1
+
+config RP23XX_SPI1_CS_GPIO
+	default 46 if RP23XX_SPI1
+
+config RP23XX_SPI1_SCK_GPIO
+	default 30 if RP23XX_SPI1
+
+config RP23XX_SPI1_TX_GPIO
+	default 31 if RP23XX_SPI1
+
+config RP23XX_SPISD_SPI_CH
+	default 0 if RP23XX_SPISD
+
+endif

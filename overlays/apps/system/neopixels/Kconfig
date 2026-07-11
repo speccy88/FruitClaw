@@ -1,0 +1,32 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_NEOPIXELS
+	tristate "'neopixels' command"
+	default n
+	depends on WS2812
+	---help---
+		Enable a command that controls a WS2812/NeoPixel character
+		device.
+
+if SYSTEM_NEOPIXELS
+
+config SYSTEM_NEOPIXELS_PROGNAME
+	string "Program name"
+	default "neopixels"
+
+config SYSTEM_NEOPIXELS_PRIORITY
+	int "neopixels task priority"
+	default 100
+
+config SYSTEM_NEOPIXELS_STACKSIZE
+	int "neopixels stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+config SYSTEM_NEOPIXELS_DEVPATH
+	string "WS2812 device path"
+	default "/dev/leds0"
+
+endif

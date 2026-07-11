@@ -1,0 +1,560 @@
+diff --git a/drivers/net/netdev_upperhalf.c b/drivers/net/netdev_upperhalf.c
+index 883ce5e7f6..93b92e984e 100644
+--- a/drivers/net/netdev_upperhalf.c
++++ b/drivers/net/netdev_upperhalf.c
+@@ -87,6 +87,7 @@ struct netdev_upperhalf_s
+ #endif
+ 
+   bool txing;
++  bool txrequested;
+ 
+   /* Deferring process to work queue or thread */
+ 
+@@ -783,10 +784,26 @@ static void netdev_upper_work(FAR void *arg)
+ {
+   FAR struct netdev_upperhalf_s *upper = arg;
+ 
+-  /* RX may release quota and driver buffer, so do RX first. */
++  /* User-space TCP sends can enqueue data while holding the connection/device
++   * lock and then wake this thread to perform the actual lower-half poll.
++   * Prioritize that explicit TX wake once so accepted TCP services do not
++   * leave banners or HTTP replies queued behind opportunistic RX polling.
++   */
+ 
+-  netdev_upper_rxpoll_work(upper);
+-  netdev_upper_txavail_work(upper);
++  if (upper->txrequested)
++    {
++      upper->txrequested = false;
++      netdev_upper_txavail_work(upper);
++      netdev_upper_rxpoll_work(upper);
++      netdev_upper_txavail_work(upper);
++    }
++  else
++    {
++      /* RX may release quota and driver buffer, so do RX first. */
++
++      netdev_upper_rxpoll_work(upper);
++      netdev_upper_txavail_work(upper);
++    }
+ }
+ 
+ /****************************************************************************
+@@ -834,11 +851,17 @@ static int netdev_upper_loop(int argc, FAR char *argv[])
+  *
+  ****************************************************************************/
+ 
+-static inline void netdev_upper_queue_work(FAR struct net_driver_s *dev)
++static inline void netdev_upper_queue_work(FAR struct net_driver_s *dev,
++                                           bool txrequested)
+ {
+   FAR struct netdev_upperhalf_s *upper = dev->d_private;
+   int cpu = 0;
+ 
++  if (txrequested)
++    {
++      upper->txrequested = true;
++    }
++
+   switch (upper->lower->rxtype)
+     {
+       case NETDEV_RX_WORK:
+@@ -882,7 +905,17 @@ static inline void netdev_upper_queue_work(FAR struct net_driver_s *dev)
+ 
+ static int netdev_upper_txavail(FAR struct net_driver_s *dev)
+ {
+-  netdev_upper_txavail_work(dev->d_private);
++  FAR struct netdev_upperhalf_s *upper = dev->d_private;
++
++  if (upper->lower->rxtype == NETDEV_RX_DIRECT)
++    {
++      netdev_upper_txavail_work(upper);
++    }
++  else
++    {
++      netdev_upper_queue_work(dev, true);
++    }
++
+   return OK;
+ }
+ 
+@@ -1589,7 +1622,7 @@ void netdev_lower_rxready(FAR struct netdev_lowerhalf_s *dev)
+     }
+   else
+     {
+-      netdev_upper_queue_work(&dev->netdev);
++      netdev_upper_queue_work(&dev->netdev, false);
+     }
+ }
+ 
+@@ -1616,7 +1649,7 @@ void netdev_lower_txdone(FAR struct netdev_lowerhalf_s *dev)
+     }
+   else
+     {
+-      netdev_upper_queue_work(&dev->netdev);
++      netdev_upper_queue_work(&dev->netdev, true);
+     }
+ 
+   NETDEV_TXDONE(&dev->netdev);
+diff --git a/drivers/net/telnet.c b/drivers/net/telnet.c
+index b81157a954..48107fdea7 100644
+--- a/drivers/net/telnet.c
++++ b/drivers/net/telnet.c
+@@ -32,6 +32,7 @@
+ #include <poll.h>
+ #include <errno.h>
+ #include <nuttx/debug.h>
++#include <nuttx/compiler.h>
+ #include <termios.h>
+ 
+ #include <nuttx/kmalloc.h>
+@@ -70,6 +71,7 @@
+ /* Telnet protocol stuff ****************************************************/
+ 
+ #define TELNET_NL             0x0a
++#define TELNET_NUL            0x00
+ #define TELNET_CR             0x0d
+ 
+ /* Telnet commands */
+@@ -119,6 +121,7 @@ struct telnet_dev_s
+   uint8_t           td_crefs;     /* The number of open references to the session */
+   uint8_t           td_minor;     /* Minor device number */
+   bool              td_sb_iac;    /* Saw IAC within sub-negotiation payload */
++  bool              td_skip_cr_suffix; /* Skip LF/NUL after Telnet CR */
+   uint16_t          td_offset;    /* Offset to the valid, pending bytes in the rxbuffer */
+   uint16_t          td_pending;   /* Number of valid, pending bytes in the rxbuffer */
+ #ifdef CONFIG_TELNET_SUPPORT_NAWS
+@@ -156,6 +159,7 @@ static bool    telnet_putchar(FAR struct telnet_dev_s *priv, uint8_t ch,
+                  int *nwritten);
+ static void    telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+                  uint8_t value);
++static void    telnet_send_echo_state(FAR struct telnet_dev_s *priv);
+ 
+ /* Telnet character driver methods */
+ 
+@@ -183,6 +187,11 @@ static ssize_t factory_write(FAR struct file *filep, FAR const char *buffer,
+ static int     factory_ioctl(FAR struct file *filep, int cmd,
+                  unsigned long arg);
+ 
++void weak_function telnet_activity_hook(FAR const char *phase)
++{
++  (void)phase;
++}
++
+ /****************************************************************************
+  * Private Data
+  ****************************************************************************/
+@@ -393,10 +402,15 @@ static ssize_t telnet_receive(FAR struct telnet_dev_s *priv,
+             break;
+ 
+           case STATE_WILL:
++            if (ch == TELNET_SGA)
++              {
++                telnet_sendopt(priv, TELNET_DO, ch);
++              }
++
+ #ifdef CONFIG_TELNET_SUPPORT_NAWS
+             /* For NAWS, Reply with a DO */
+ 
+-            if (ch == TELNET_NAWS)
++            else if (ch == TELNET_NAWS)
+               {
+                 telnet_sendopt(priv, TELNET_DO, ch);
+               }
+@@ -422,20 +436,20 @@ static ssize_t telnet_receive(FAR struct telnet_dev_s *priv,
+ 
+             if (ch == TELNET_SGA)
+               {
+-                /* Reply with a WONT, that means we will not work in
+-                 * character mode and stay in line mode,
+-                 * it's OK for modern rich featured telnet clients.
++                /* Suppress Go Ahead is normal for interactive remote shells
++                 * and keeps common desktop telnet clients out of awkward
++                 * local line-mode behavior.
+                  */
+ 
+-                telnet_sendopt(priv, TELNET_WONT, ch);
++                telnet_sendopt(priv, TELNET_WILL, ch);
+               }
+-            else if ((priv->td_lflag & ECHO) != 0 && ch == TELNET_ECHO)
++            else if (ch == TELNET_ECHO)
+               {
+-                telnet_sendopt(priv, TELNET_WONT, ch);
++                telnet_send_echo_state(priv);
+               }
+             else
+               {
+-                telnet_sendopt(priv, TELNET_WILL, ch);
++                telnet_sendopt(priv, TELNET_WONT, ch);
+               }
+ 
+             priv->td_state = STATE_NORMAL;
+@@ -450,10 +464,25 @@ static ssize_t telnet_receive(FAR struct telnet_dev_s *priv,
+             break;
+ 
+           case STATE_NORMAL:
++            if (priv->td_skip_cr_suffix)
++              {
++                priv->td_skip_cr_suffix = false;
++
++                if (ch == TELNET_NL || ch == TELNET_NUL)
++                  {
++                    break;
++                  }
++              }
++
+             if (ch == TELNET_IAC)
+               {
+                 priv->td_state = STATE_IAC;
+               }
++            else if (ch == TELNET_CR)
++              {
++                telnet_getchar(priv, TELNET_CR, dest, &nread);
++                priv->td_skip_cr_suffix = true;
++              }
+             else
+               {
+                 telnet_getchar(priv, ch, dest, &nread);
+@@ -591,23 +620,30 @@ static bool telnet_putchar(FAR struct telnet_dev_s *priv, uint8_t ch,
+ 
+   if (ch != TELNET_CR)
+     {
+-      /* Add all other characters to the destination buffer */
+-
+       index = *nread;
+-      priv->td_txbuffer[index++] = ch;
+ 
+       /* Check for line feeds */
+ 
+       if (ch == TELNET_NL)
+         {
+-          /* Now add the carriage return */
++          /* Telnet NVT uses CR-LF on the wire.  Put the carriage return
++           * before the line feed so desktop telnet clients do not display a
++           * trailing CR as ^M.
++           */
+ 
+           priv->td_txbuffer[index++] = TELNET_CR;
++          priv->td_txbuffer[index++] = ch;
+ 
+           /* End of line */
+ 
+           ret = true;
+         }
++      else
++        {
++          /* Add all other characters to the destination buffer */
++
++          priv->td_txbuffer[index++] = ch;
++        }
+ 
+       *nread = index;
+     }
+@@ -635,13 +671,38 @@ static void telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+ 
+   telnet_dumpbuffer("Send optbuf", optbuf, 3);
+ 
++  telnet_activity_hook("sendopt");
+   ret = psock_send(&priv->td_psock, optbuf, 3, 0);
++  telnet_activity_hook(ret < 0 ? "sendopt-fail" : "sendopt-ok");
+   if (ret < 0)
+     {
+       nerr("ERROR: Failed to send TELNET_IAC: %d\n", ret);
+     }
+ }
+ 
++/****************************************************************************
++ * Name: telnet_send_echo_state
++ ****************************************************************************/
++
++static void telnet_send_echo_state(FAR struct telnet_dev_s *priv)
++{
++  if ((priv->td_lflag & ECHO) != 0)
++    {
++      /* NuttX readline echoes normal interactive input.  Tell the Telnet
++       * client that the server will provide echo so clients do not get stuck
++       * in local line/echo behavior that differs from serial NSH.
++       */
++
++      telnet_sendopt(priv, TELNET_WILL, TELNET_ECHO);
++    }
++  else
++    {
++      /* Password prompts and other no-echo terminal modes clear ECHO. */
++
++      telnet_sendopt(priv, TELNET_WONT, TELNET_ECHO);
++    }
++}
++
+ /****************************************************************************
+  * Name: telnet_open
+  ****************************************************************************/
+@@ -805,10 +866,12 @@ static ssize_t telnet_read(FAR struct file *filep, FAR char *buffer,
+ 
+       if (priv->td_pending == 0)
+         {
++          telnet_activity_hook("read-wait");
+           nread = psock_recv(&priv->td_psock,
+                              priv->td_rxbuffer,
+                              CONFIG_TELNET_RXBUFFER_SIZE,
+                              0);
++          telnet_activity_hook(nread <= 0 ? "read-fail" : "read-ok");
+           if (nread <= 0)
+             {
+               return nread;
+@@ -880,7 +943,10 @@ static ssize_t telnet_write(FAR struct file *filep, FAR const char *buffer,
+         {
+           /* Yes... send the data now */
+ 
++          telnet_activity_hook("write-send");
+           ret = psock_send(&priv->td_psock, priv->td_txbuffer, ncopied, 0);
++          telnet_activity_hook(ret < 0 ? "write-send-fail" :
++                               "write-send-ok");
+           if (ret < 0)
+             {
+               nerr("ERROR: psock_send failed '%s': %zd\n",
+@@ -898,7 +964,10 @@ static ssize_t telnet_write(FAR struct file *filep, FAR const char *buffer,
+ 
+   if (ncopied > 0)
+     {
++      telnet_activity_hook("write-flush");
+       ret = psock_send(&priv->td_psock, priv->td_txbuffer, ncopied, 0);
++      telnet_activity_hook(ret < 0 ? "write-flush-fail" :
++                           "write-flush-ok");
+       if (ret < 0)
+         {
+           nerr("ERROR: psock_send failed '%s': %zd\n",
+@@ -1039,6 +1108,16 @@ static int telnet_session(FAR struct telnet_session_s *session)
+   telnet_sendopt(priv, TELNET_DO, TELNET_NAWS);
+ #endif
+ 
++  /* Make interactive shell sessions settle quickly with common desktop
++   * telnet clients.  Waiting for the client to initiate SGA negotiation can
++   * leave some clients in awkward local line mode where CR handling is
++   * presented poorly.
++   */
++
++  telnet_sendopt(priv, TELNET_WILL, TELNET_SGA);
++  telnet_sendopt(priv, TELNET_DO, TELNET_SGA);
++  telnet_send_echo_state(priv);
++
+   /* Save ourself in the list of Telnet client threads */
+ 
+   g_telnet_clients[priv->td_minor] = priv;
+@@ -1144,24 +1223,7 @@ static int telnet_ioctl(FAR struct file *filep, int cmd, unsigned long arg)
+         /* Save the termios settings */
+ 
+         priv->td_lflag = termiosp->c_lflag;
+-
+-        if ((priv->td_lflag & ECHO) != 0)
+-          {
+-            /* If ECHO is set, then we need to send the won't echo option
+-             * to the client, let the client do echo to emulate
+-             * the behavior of a real terminal.
+-             */
+-
+-            telnet_sendopt(priv, TELNET_WONT, TELNET_ECHO);
+-          }
+-        else
+-          {
+-            /* Otherwise, we need to send the will echo option to the
+-             * client, let the client don't echo to disable the echo.
+-             */
+-
+-            telnet_sendopt(priv, TELNET_WILL, TELNET_ECHO);
+-          }
++        telnet_send_echo_state(priv);
+       }
+       break;
+ 
+@@ -1210,6 +1272,7 @@ static int telnet_poll(FAR struct file *filep, FAR struct pollfd *fds,
+ 
+   /* Then let psock_poll() do the heavy lifting */
+ 
++  telnet_activity_hook(setup ? "poll-setup" : "poll-teardown");
+   return psock_poll(&priv->td_psock, fds, setup);
+ }
+ 
+diff --git a/include/nuttx/net/tcp.h b/include/nuttx/net/tcp.h
+index 5804b19f5a..378f3819ec 100644
+--- a/include/nuttx/net/tcp.h
++++ b/include/nuttx/net/tcp.h
+@@ -200,6 +200,27 @@ struct tcp_stats_s
+ };
+ #endif
+ 
++/* Optional lightweight diagnostics for buffered TCP send.  These counters are
++ * intended for board bring-up and service health reporting.
++ */
++
++#ifdef CONFIG_NET_TCP_WRITE_BUFFERS
++struct tcp_sendbuffer_diag_s
++{
++  uint32_t send_calls;
++  uint32_t send_ok;
++  uint32_t send_eagain;
++  uint32_t callback_alloc_fail;
++  uint32_t wrbuffer_alloc_fail;
++  uint32_t iob_copy_fail;
++  uint32_t txnotify_calls;
++  uint32_t queued_bytes;
++  int32_t  last_ret;
++  uint32_t last_flags;
++  uint32_t last_nonblock;
++};
++#endif
++
+ /****************************************************************************
+  * Public Data
+  ****************************************************************************/
+@@ -208,5 +229,10 @@ struct tcp_stats_s
+  * Public Function Prototypes
+  ****************************************************************************/
+ 
++#ifdef CONFIG_NET_TCP_WRITE_BUFFERS
++int tcp_wrbuffer_navail(void);
++void tcp_sendbuffer_diag(FAR struct tcp_sendbuffer_diag_s *diag);
++#endif
++
+ #endif /* CONFIG_NET_TCP */
+ #endif /* __INCLUDE_NUTTX_NET_TCP_H */
+diff --git a/net/tcp/tcp_send_buffered.c b/net/tcp/tcp_send_buffered.c
+index fbccf98c45..b5c54de74d 100644
+--- a/net/tcp/tcp_send_buffered.c
++++ b/net/tcp/tcp_send_buffered.c
+@@ -88,6 +88,12 @@
+ #  define TCP_WBDUMP(msg,wrb,len,offset)
+ #endif
+ 
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++static struct tcp_sendbuffer_diag_s g_tcp_sendbuffer_diag;
++
+ /****************************************************************************
+  * Private Functions
+  ****************************************************************************/
+@@ -1331,6 +1337,22 @@ static unsigned int tcp_send_gettimeout(clock_t start, unsigned int timeout)
+  *
+  ****************************************************************************/
+ 
++void tcp_sendbuffer_diag(FAR struct tcp_sendbuffer_diag_s *diag)
++{
++  if (diag != NULL)
++    {
++      *diag = g_tcp_sendbuffer_diag;
++    }
++}
++
++/****************************************************************************
++ * Name: psock_tcp_send
++ *
++ * Description:
++ *   The TCP write-buffering implementation of psock_tcp_send().
++ *
++ ****************************************************************************/
++
+ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+                        size_t len, int flags)
+ {
+@@ -1343,6 +1365,9 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+   int        ret = OK;
+   clock_t    start;
+ 
++  g_tcp_sendbuffer_diag.send_calls++;
++  g_tcp_sendbuffer_diag.last_flags = (uint32_t)flags;
++
+   if (psock == NULL || psock->s_type != SOCK_STREAM ||
+       psock->s_conn == NULL)
+     {
+@@ -1400,6 +1425,7 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+ 
+   nonblock = _SS_ISNONBLOCK(conn->sconn.s_flags) ||
+                             (flags & MSG_DONTWAIT) != 0;
++  g_tcp_sendbuffer_diag.last_nonblock = nonblock ? 1 : 0;
+   start    = clock_systime_ticks();
+   timeout  = _SO_TIMEOUT(conn->sconn.s_sndtimeo);
+ 
+@@ -1441,6 +1467,7 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+               /* A buffer allocation error occurred */
+ 
+               nerr("ERROR: Failed to allocate callback\n");
++              g_tcp_sendbuffer_diag.callback_alloc_fail++;
+               ret = nonblock ? -EAGAIN : -ENOMEM;
+               goto errout_with_lock;
+             }
+@@ -1542,6 +1569,7 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+               /* A buffer allocation error occurred */
+ 
+               nerr("ERROR: Failed to allocate write buffer\n");
++              g_tcp_sendbuffer_diag.wrbuffer_alloc_fail++;
+ 
+               if (nonblock || timeout != UINT_MAX)
+                 {
+@@ -1628,6 +1656,7 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+                            tcp_send_gettimeout(start, timeout) == 0))
+             {
+               nerr("ERROR: Failed to add data to the I/O chain\n");
++              g_tcp_sendbuffer_diag.iob_copy_fail++;
+               ret = -EAGAIN;
+               goto errout_with_lock;
+             }
+@@ -1663,6 +1692,8 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+ 
+       /* Notify the device driver of the availability of TX data */
+ 
++      g_tcp_sendbuffer_diag.txnotify_calls++;
++      g_tcp_sendbuffer_diag.queued_bytes += (uint32_t)TCP_WBPKTLEN(wrb);
+       tcp_send_txnotify(psock, conn);
+       conn_dev_unlock(&conn->sconn, conn->dev);
+ 
+@@ -1707,6 +1738,8 @@ ssize_t psock_tcp_send(FAR struct socket *psock, FAR const void *buf,
+ 
+   /* Return the number of bytes actually sent */
+ 
++  g_tcp_sendbuffer_diag.send_ok++;
++  g_tcp_sendbuffer_diag.last_ret = (int32_t)result;
+   return result;
+ 
+ errout_with_lock:
+@@ -1715,9 +1748,17 @@ errout_with_lock:
+ errout:
+   if (result > 0)
+     {
++      g_tcp_sendbuffer_diag.send_ok++;
++      g_tcp_sendbuffer_diag.last_ret = (int32_t)result;
+       return result;
+     }
+ 
++  if (ret == -EAGAIN)
++    {
++      g_tcp_sendbuffer_diag.send_eagain++;
++    }
++
++  g_tcp_sendbuffer_diag.last_ret = (int32_t)ret;
+   return ret;
+ }
+ 
+diff --git a/net/tcp/tcp_wrbuffer.c b/net/tcp/tcp_wrbuffer.c
+index 5c8a738568..30c480f606 100644
+--- a/net/tcp/tcp_wrbuffer.c
++++ b/net/tcp/tcp_wrbuffer.c
+@@ -253,4 +253,17 @@ int tcp_wrbuffer_test(void)
+   return NET_BUFPOOL_TEST(g_wrbuffer);
+ }
+ 
++/****************************************************************************
++ * Name: tcp_wrbuffer_navail
++ *
++ * Description:
++ *   Return the number of currently available write-buffer heads.
++ *
++ ****************************************************************************/
++
++int tcp_wrbuffer_navail(void)
++{
++  return NET_BUFPOOL_NAVAIL(g_wrbuffer);
++}
++
+ #endif /* CONFIG_NET_TCP && CONFIG_NET_TCP_WRITE_BUFFERS */

@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_SYSTEM_WIFIASSOC),)
+CONFIGURED_APPS += $(APPDIR)/system/wifiassoc
+endif

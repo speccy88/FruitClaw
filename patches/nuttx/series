@@ -1,0 +1,6 @@
+0001-rp23xx-core.patch
+0002-rp23xx-board-common.patch
+0003-rp23xx-usb-console.patch
+0004-rp23xx-esp-hosted-integration.patch
+0005-network-hardening.patch
+0006-pico2w-cyw43439-integration.patch

@@ -1,0 +1,611 @@
+diff --git a/boards/Kconfig b/boards/Kconfig
+index 58bc9c313f..918eb458fc 100644
+--- a/boards/Kconfig
++++ b/boards/Kconfig
+@@ -2218,6 +2218,16 @@ config ARCH_BOARD_ADAFRUIT_QT_PY_RP2040
+ 		This is a port to the Adafruit QT Py RP2040 board.
+ 		Support is derived from Raspberry Pi Pico support.
+ 
++config ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
++	bool "Adafruit Fruit Jam RP2350 board"
++	depends on ARCH_CHIP_RP23XX
++	select ARCH_HAVE_BUTTONS
++	select ARCH_HAVE_IRQBUTTONS
++	select ARCH_HAVE_LEDS
++	---help---
++	This is a port to the Adafruit Fruit Jam RP2350B board.
++		Support is derived from Raspberry Pi Pico 2 support.
++
+ config ARCH_BOARD_RASPBERRYPI_PICO_2
+ 	bool "Raspberry Pi Pico 2 board (not Pico, not W)"
+ 	depends on ARCH_CHIP_RP23XX
+@@ -3906,6 +3916,7 @@ config ARCH_BOARD
+ 	default "adafruit-kb2040"              if ARCH_BOARD_ADAFRUIT_KB2040
+ 	default "adafruit-qt-py-rp2040"        if ARCH_BOARD_ADAFRUIT_QT_PY_RP2040
+ 	default "waveshare-rp2040-lcd-1.28"    if ARCH_BOARD_WAVESHARE_RP2040_LCD_1_28
++	default "adafruit-fruit-jam-rp2350"    if ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
+ 	default "raspberrypi-pico-2"           if ARCH_BOARD_RASPBERRYPI_PICO_2
+ 	default "raspberrypi-pico-2-rv"        if ARCH_BOARD_RASPBERRYPI_PICO_2_RV
+ 	default "xiao-rp2350"                  if ARCH_BOARD_XIAO_RP2350
+@@ -4434,6 +4445,9 @@ endif
+ if ARCH_BOARD_RASPBERRYPI_PICO_2
+ source "boards/arm/rp23xx/raspberrypi-pico-2/Kconfig"
+ endif
++if ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
++source "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/Kconfig"
++endif
+ if ARCH_BOARD_XIAO_RP2350
+ source "boards/arm/rp23xx/xiao-rp2350/Kconfig"
+ endif
+diff --git a/boards/arm/rp23xx/common/Kconfig b/boards/arm/rp23xx/common/Kconfig
+index aceef7ee7a..c1ef0396db 100644
+--- a/boards/arm/rp23xx/common/Kconfig
++++ b/boards/arm/rp23xx/common/Kconfig
+@@ -143,35 +143,47 @@ endif # RP23XX_UART1
+ if RP23XX_SPI0
+ 
+ config RP23XX_SPI0_RX_GPIO
+-	int "GPIO pin for SPI0 RX (0, 4, 16, or 20)"
++	int "GPIO pin for SPI0 RX"
+ 	default 16
+-	range 0 20
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		Typical SPI0 RX pins are 0, 4, 16, 20, and on RP2350B,
++		32 and 36.
+ 		This line is also known as MISO when we are configured in
+ 		SPI master mode.
+ 
+ config RP23XX_SPI0_CS_GPIO
+-	int "GPIO pin for SPI0 CSn (1, 5, 17, or 21)"
++	int "GPIO pin for SPI0 CSn"
+ 	default 17
+-	range 1 21
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		The common RP23xx board logic drives CS as a software GPIO,
++		so boards may use a non-native chip-select pin.
+ 
+ 
+ config RP23XX_SPI0_SCK_GPIO
+-	int "GPIO pin for SPI0 SCK (2, 6, 18, or 22)"
++	int "GPIO pin for SPI0 SCK"
+ 	default 18
+-	range 2 22
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		Typical SPI0 SCK pins are 2, 6, 18, 22, and on RP2350B,
++		34 and 38.
+ 
+ config RP23XX_SPI0_TX_GPIO
+-	int "GPIO pin for SPI0 TX (3, 7, 19, or 23)"
++	int "GPIO pin for SPI0 TX"
+ 	default 19
+-	range 3 23
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		Typical SPI0 TX pins are 3, 7, 19, 23, and on RP2350B,
++		35 and 39.
+ 		This line is also known as MOSI when we are configured in
+ 		SPI master mode.
+ 
+@@ -182,34 +194,46 @@ endif # RP23XX_SPI0
+ if RP23XX_SPI1
+ 
+ config RP23XX_SPI1_RX_GPIO
+-	int "GPIO pin for SPI1 RX (8, 12, 24, or 28)"
++	int "GPIO pin for SPI1 RX"
+ 	default 8
+-	range 8 28
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		Typical SPI1 RX pins are 8, 12, 24, 28, and on RP2350B,
++		40 and 44.
+ 		This line is also known as MISO when we are configured in
+ 		SPI master mode, or MOSI when slave mode is configured.
+ 
+ config RP23XX_SPI1_CS_GPIO
+-	int "GPIO pin for SPI1 CSn (9, 13, 25, or 29)"
++	int "GPIO pin for SPI1 CSn"
+ 	default 9
+-	range 9 29
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		The common RP23xx board logic drives CS as a software GPIO,
++		so boards may use a non-native chip-select pin.
+ 
+ config RP23XX_SPI1_SCK_GPIO
+-	int "GPIO pin for SPI1 SCK (10, 14, or 26)"
++	int "GPIO pin for SPI1 SCK"
+ 	default 10
+-	range 10 26
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		Typical SPI1 SCK pins are 10, 14, 26, 30, and on RP2350B,
++		42 and 46.
+ 
+ config RP23XX_SPI1_TX_GPIO
+-	int "GPIO pin for SPI1 TX (11, 15, or 27)"
++	int "GPIO pin for SPI1 TX"
+ 	default 11
+-	range 11 27
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Refer to board documentation to see which pins are available.
++		Typical SPI1 TX pins are 11, 15, 27, 31, and on RP2350B,
++		43 and 47.
+ 		This line is also known as MOSI when we are configured in
+ 		SPI master mode, or MISO when slave mode is configured.
+ 
+@@ -509,17 +533,19 @@ endif # RP23XX_I2S
+ if RP23XX_BOARD_HAS_WS2812
+ 
+ config RP23XX_WS2812_GPIO_PIN
+-	int "GPIO pin for ws2812 data line (0-29)"
++	int "GPIO pin for ws2812 data line"
+ 	default 0
+-	range 0 29
++	range 0 47 if RP23XX_RP2350B
++	range 0 29 if !RP23XX_RP2350B
+ 	---help---
+ 		This is the GPIO pin used to send data to the
+ 		configured ws2812 pixels.
+ 
+ config RP23XX_WS2812_PWR_GPIO
+-	int "GPIO pin for ws2812 power (0-29, or -1 if not used)"
++	int "GPIO pin for ws2812 power (-1 if not used)"
+ 	default -1
+-	range -1 29
++	range -1 47 if RP23XX_RP2350B
++	range -1 29 if !RP23XX_RP2350B
+ 	---help---
+ 		Some RP23XX boards have an on-board ws2812
+ 		that is powered by a GPIO pin.  Set this
+diff --git a/boards/arm/rp23xx/common/src/rp23xx_common_bringup.c b/boards/arm/rp23xx/common/src/rp23xx_common_bringup.c
+index 10b941ce3c..3962a6519f 100644
+--- a/boards/arm/rp23xx/common/src/rp23xx_common_bringup.c
++++ b/boards/arm/rp23xx/common/src/rp23xx_common_bringup.c
+@@ -24,12 +24,18 @@
+ 
+ #include <nuttx/config.h>
+ 
++#include <errno.h>
+ #include <nuttx/debug.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <sys/mount.h>
+ #include <sys/stat.h>
+ 
++#include <nuttx/drivers/ramdisk.h>
+ #include <nuttx/fs/fs.h>
++#ifdef CONFIG_VIDEO_FB
++#  include <nuttx/video/fb.h>
++#endif
+ 
+ #include <arch/board/board.h>
+ 
+@@ -50,7 +56,9 @@
+ #endif
+ 
+ #if defined(CONFIG_RP23XX_ROMFS_ROMDISK_DEVNAME)
+-#  include <rp23xx_romfsimg.h>
++#  include <arch/board/rp23xx_romfsimg.h>
++#  define NSECTORS(b) (((b) + CONFIG_RP23XX_ROMFS_ROMDISK_SECTSIZE - 1) / \
++                       CONFIG_RP23XX_ROMFS_ROMDISK_SECTSIZE)
+ #endif
+ 
+ #if defined(CONFIG_RP23XX_BOARD_HAS_WS2812) && defined(CONFIG_WS2812)
+@@ -413,6 +421,14 @@ int rp23xx_common_bringup(void)
+     }
+ #endif
+ 
++#ifdef CONFIG_VIDEO_FB
++  ret = fb_register(0, 0);
++  if (ret < 0)
++    {
++      syslog(LOG_ERR, "Failed to initialize Frame Buffer Driver: %d\n", ret);
++    }
++#endif
++
+ #ifdef CONFIG_DEV_GPIO
+   ret = rp23xx_dev_gpio_init();
+   if (ret < 0)
+@@ -502,6 +518,15 @@ int rp23xx_common_bringup(void)
+     }
+   else
+     {
++      ret = mkdir(CONFIG_RP23XX_ROMFS_MOUNT_MOUNTPOINT, 0777);
++      if (ret < 0 && errno != EEXIST)
++        {
++          syslog(LOG_ERR,
++                 "ERROR: mkdir(%s) failed: %d\n",
++                 CONFIG_RP23XX_ROMFS_MOUNT_MOUNTPOINT,
++                 errno);
++        }
++
+       /* Mount the file system */
+ 
+       ret = nx_mount(CONFIG_RP23XX_ROMFS_ROMDISK_DEVNAME,
+diff --git a/boards/arm/rp23xx/common/src/rp23xx_i2sdev.c b/boards/arm/rp23xx/common/src/rp23xx_i2sdev.c
+index a271a6b4a7..c7bbe80d53 100644
+--- a/boards/arm/rp23xx/common/src/rp23xx_i2sdev.c
++++ b/boards/arm/rp23xx/common/src/rp23xx_i2sdev.c
+@@ -26,6 +26,7 @@
+ 
+ #include <stdio.h>
+ #include <nuttx/debug.h>
++#include <nuttx/compiler.h>
+ #include <errno.h>
+ 
+ #include <nuttx/audio/audio.h>
+@@ -38,6 +39,15 @@
+ #include "arm_internal.h"
+ #include "rp23xx_i2s.h"
+ 
++/****************************************************************************
++ * Weak Functions
++ ****************************************************************************/
++
++int weak_function board_i2sdev_codec_initialize(int port)
++{
++  return OK;
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -60,10 +70,25 @@ int board_i2sdev_initialize(int port)
+ 
+   ainfo("Initializing I2S\n");
+ 
++  ret = board_i2sdev_codec_initialize(port);
++  if (ret < 0)
++    {
++      auderr("ERROR: Failed to initialize I2S codec: %d\n", ret);
++    }
++
+   i2s = rp23xx_i2sbus_initialize(port);
++  if (i2s == NULL)
++    {
++      auderr("ERROR: Failed to initialize I2S bus\n");
++      return -ENODEV;
++    }
+ 
+ #ifdef CONFIG_AUDIO_I2SCHAR
+-  i2schar_register(i2s, 0);
++  ret = i2schar_register(i2s, 0);
++  if (ret < 0)
++    {
++      auderr("ERROR: Failed to register /dev/i2schar0: %d\n", ret);
++    }
+ #endif
+ 
+   audio_i2s = audio_i2s_initialize(i2s, true);
+diff --git a/boards/arm/rp23xx/common/src/rp23xx_spi.c b/boards/arm/rp23xx/common/src/rp23xx_spi.c
+index cb2a6c6eb2..2e850e7c2e 100644
+--- a/boards/arm/rp23xx/common/src/rp23xx_spi.c
++++ b/boards/arm/rp23xx/common/src/rp23xx_spi.c
+@@ -37,6 +37,20 @@
+ #include "rp23xx_gpio.h"
+ #include "hardware/rp23xx_spi.h"
+ 
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++#if defined(CONFIG_SPI_CALLBACK) && defined(CONFIG_RP23XX_SPI0)
++static spi_mediachange_t g_rp23xx_spi0_mediachange;
++static void *g_rp23xx_spi0_mediachange_arg;
++#endif
++
++#if defined(CONFIG_SPI_CALLBACK) && defined(CONFIG_RP23XX_SPI1)
++static spi_mediachange_t g_rp23xx_spi1_mediachange;
++static void *g_rp23xx_spi1_mediachange_arg;
++#endif
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -87,6 +101,28 @@ uint8_t rp23xx_spi0status(struct spi_dev_s *dev, uint32_t devid)
+   return ret;
+ }
+ 
++#ifdef CONFIG_SPI_CALLBACK
++int rp23xx_spi0register(struct spi_dev_s *dev,
++                        spi_mediachange_t callback,
++                        void *arg)
++{
++  g_rp23xx_spi0_mediachange = callback;
++  g_rp23xx_spi0_mediachange_arg = arg;
++  return OK;
++}
++
++int rp23xx_spi0_mediachange(void)
++{
++  if (g_rp23xx_spi0_mediachange == NULL)
++    {
++      return -ENODEV;
++    }
++
++  g_rp23xx_spi0_mediachange(g_rp23xx_spi0_mediachange_arg);
++  return OK;
++}
++#endif
++
+ #ifdef CONFIG_SPI_CMDDATA
+ int rp23xx_spi0cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)
+ {
+@@ -128,6 +164,28 @@ uint8_t rp23xx_spi1status(struct spi_dev_s *dev, uint32_t devid)
+   return ret;
+ }
+ 
++#ifdef CONFIG_SPI_CALLBACK
++int rp23xx_spi1register(struct spi_dev_s *dev,
++                        spi_mediachange_t callback,
++                        void *arg)
++{
++  g_rp23xx_spi1_mediachange = callback;
++  g_rp23xx_spi1_mediachange_arg = arg;
++  return OK;
++}
++
++int rp23xx_spi1_mediachange(void)
++{
++  if (g_rp23xx_spi1_mediachange == NULL)
++    {
++      return -ENODEV;
++    }
++
++  g_rp23xx_spi1_mediachange(g_rp23xx_spi1_mediachange_arg);
++  return OK;
++}
++#endif
++
+ #ifdef CONFIG_SPI_CMDDATA
+ int rp23xx_spi1cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)
+ {
+diff --git a/boards/arm/rp23xx/common/src/rp23xx_spisd.c b/boards/arm/rp23xx/common/src/rp23xx_spisd.c
+index 211ce5e224..83f76cf37d 100644
+--- a/boards/arm/rp23xx/common/src/rp23xx_spisd.c
++++ b/boards/arm/rp23xx/common/src/rp23xx_spisd.c
+@@ -24,11 +24,23 @@
+ 
+ #include <nuttx/config.h>
+ 
++#ifdef CONFIG_RP23XX_SPISD_AUTOMOUNT
++#  include <errno.h>
++#  include <stdbool.h>
++#  include <stdio.h>
++#  include <sys/stat.h>
++#endif
++
+ #include <nuttx/debug.h>
+ #include <nuttx/mmcsd.h>
+ #include <nuttx/board.h>
+ #include <nuttx/fs/fs.h>
+ 
++#if defined(CONFIG_RP23XX_SPISD_AUTOMOUNT) && \
++    (defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION))
++#  include <nuttx/fs/partition.h>
++#endif
++
+ #include "rp23xx_spi.h"
+ #include "rp23xx_gpio.h"
+ 
+@@ -42,6 +54,152 @@
+ #  define CONFIG_RP23XX_SPISD_SLOT_NO 0
+ #endif
+ 
++#define RP23XX_SPISD_BLOCKDEV   "/dev/mmcsd0"
++#define RP23XX_SPISD_PARTDEV    "/dev/mmcsd0p0"
++#define RP23XX_SPISD_MOUNTPT    "/mnt/sd0"
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++#ifdef CONFIG_RP23XX_SPISD_AUTOMOUNT
++#if defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION)
++static bool rp23xx_spisd_register_partitions(FAR int *parse_ret);
++#endif
++
++static int rp23xx_spisd_mkdir(FAR const char *path)
++{
++  int ret;
++
++  ret = mkdir(path, 0777);
++  if (ret < 0 && errno != EEXIST)
++    {
++      _err("ERROR: mkdir(%s) failed: %d\n", path, errno);
++      return -errno;
++    }
++
++  return OK;
++}
++
++static int rp23xx_spisd_mount(FAR const char *devpath)
++{
++  int ret;
++
++  ret = nx_mount(devpath, RP23XX_SPISD_MOUNTPT, "vfat", 0, NULL);
++  if (ret < 0 && ret != -EBUSY)
++    {
++      _err("ERROR: Failed to mount %s at %s: %d\n",
++           devpath, RP23XX_SPISD_MOUNTPT, ret);
++    }
++
++  return ret;
++}
++
++static int rp23xx_spisd_mediachange(void)
++{
++#ifndef CONFIG_SPI_CALLBACK
++  return -ENOSYS;
++#else
++#if CONFIG_RP23XX_SPISD_SPI_CH == 0
++#  ifdef CONFIG_RP23XX_SPI0
++  return rp23xx_spi0_mediachange();
++#  else
++  return -ENODEV;
++#  endif
++#elif CONFIG_RP23XX_SPISD_SPI_CH == 1
++#  ifdef CONFIG_RP23XX_SPI1
++  return rp23xx_spi1_mediachange();
++#  else
++  return -ENODEV;
++#  endif
++#else
++  return -ENODEV;
++#endif
++#endif
++}
++
++int board_spisd_mount(void)
++{
++  int ret;
++#if defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION)
++  int parse_ret = OK;
++#endif
++
++  rp23xx_spisd_mkdir("/mnt");
++  rp23xx_spisd_mkdir(RP23XX_SPISD_MOUNTPT);
++
++  ret = rp23xx_spisd_mediachange();
++  if (ret < 0 && ret != -ENODEV)
++    {
++      _err("ERROR: Failed to rescan SPI SDCARD media: %d\n", ret);
++    }
++
++#if defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION)
++  if (rp23xx_spisd_register_partitions(&parse_ret))
++    {
++      ret = rp23xx_spisd_mount(RP23XX_SPISD_PARTDEV);
++      return (ret >= 0 || ret == -EBUSY) ? OK : ret;
++    }
++
++  if (parse_ret < 0 && parse_ret != -EINVAL)
++    {
++      _err("ERROR: SDCARD partition probe failed: %d\n", parse_ret);
++      return parse_ret;
++    }
++#endif
++
++  ret = rp23xx_spisd_mount(RP23XX_SPISD_BLOCKDEV);
++  return (ret >= 0 || ret == -EBUSY) ? OK : ret;
++}
++
++#if defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION)
++static void rp23xx_spisd_partition_handler(FAR struct partition_s *part,
++                                           FAR void *arg)
++{
++  FAR bool *registered = (FAR bool *)arg;
++  char devname[32];
++  int ret;
++
++  snprintf(devname, sizeof(devname), "/dev/mmcsd0p%zu", part->index);
++  ret = register_blockpartition(devname, 0660, RP23XX_SPISD_BLOCKDEV,
++                                part->firstblock, part->nblocks);
++  if (ret >= 0 || ret == -EEXIST)
++    {
++      _info("Registered SD partition %s (start=%lu nblocks=%lu)\n",
++            devname, (unsigned long)part->firstblock,
++            (unsigned long)part->nblocks);
++      *registered = true;
++    }
++  else
++    {
++      _err("ERROR: Failed to register SD partition %s: %d\n",
++           devname, ret);
++    }
++}
++
++static bool rp23xx_spisd_register_partitions(FAR int *parse_ret)
++{
++  bool registered = false;
++  int ret;
++
++  ret = parse_block_partition(RP23XX_SPISD_BLOCKDEV,
++                              rp23xx_spisd_partition_handler,
++                              &registered);
++  if (parse_ret != NULL)
++    {
++      *parse_ret = ret;
++    }
++
++  if (ret < 0)
++    {
++      _err("ERROR: Failed to parse SD partition table: %d\n", ret);
++    }
++
++  return registered;
++}
++#endif
++#endif
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -98,11 +256,16 @@ int board_spisd_initialize(int minor, int bus)
+ 
+   /* Mount filesystem */
+ 
+-  ret = nx_mount("/dev/mmcsd0", "/mnt/sd0", "vfat", 0, NULL);
++#ifdef CONFIG_RP23XX_SPISD_AUTOMOUNT
++  ret = board_spisd_mount();
+   if (ret < 0)
+     {
+-      _err("ERROR: Failed to mount the SDCARD. %d\n", ret);
++      _err("ERROR: SPI SDCARD is not mounted; persistence will be "
++           "unavailable: %d\n", ret);
+     }
++#else
++  _info("SPI SDCARD block device ready; automount disabled\n");
++#endif
+ 
+   return OK;
+ }
+diff --git a/include/nuttx/board.h b/include/nuttx/board.h
+index bb5c8b4f6a..319c817a08 100644
+--- a/include/nuttx/board.h
++++ b/include/nuttx/board.h
+@@ -173,6 +173,25 @@ void board_early_initialize(void);
+ void board_late_initialize(void);
+ #endif
+ 
++/****************************************************************************
++ * Name: board_cdcacm_connected
++ *
++ * Description:
++ *   Notify board logic when a CDC/ACM function is configured or
++ *   unconfigured by the USB host.  Boards may override this weak hook for
++ *   bring-up diagnostics or policy that depends on USB console availability.
++ *
++ * Input Parameters:
++ *   minor     - CDC/ACM minor number, e.g. 0 for /dev/ttyACM0.
++ *   connected - True when the host configured the function, false when it is
++ *               no longer configured.
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_CDCACM
++void board_cdcacm_connected(int minor, bool connected);
++#endif
++
+ /****************************************************************************
+  * Name: board_app_finalinitialize
+  *

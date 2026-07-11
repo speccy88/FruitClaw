@@ -1,0 +1,37 @@
+diff --git a/examples/webserver/Makefile b/examples/webserver/Makefile
+index d07ef23de..5e8101f28 100644
+--- a/examples/webserver/Makefile
++++ b/examples/webserver/Makefile
+@@ -36,7 +36,9 @@ MODULE = $(CONFIG_EXAMPLES_WEBSERVER)
+ 
+ # Common build
+ 
+-httpd_fsdata.c: httpd-fs/*
++HTTPD_FSDATA_FILES := $(shell find httpd-fs -type f | sort)
++
++httpd_fsdata.c: $(HTTPD_FSDATA_FILES)
+ 	$(TOPDIR)/tools/mkfsdata.pl
+ 
+ clean::
+diff --git a/examples/webserver/httpd-fs/index.shtml b/examples/webserver/httpd-fs/index.shtml
+index 7f19358ce..a50e47d90 100644
+--- a/examples/webserver/httpd-fs/index.shtml
++++ b/examples/webserver/httpd-fs/index.shtml
+@@ -1,10 +1,7 @@
+-%!: /header.html
+-  <p>
+-  These web pages are served by a small web server running on top of
+-  the <a href="http://www.sics.se/~adam/uip/">uIP embedded TCP/IP
+-  stack</a>.
+-  </p>
+-  <p>
+-  Click on the links above for web server statistics.
+-  </p>
+-%!: /footer.html
++<!doctype html>
++<meta charset="utf-8">
++<meta http-equiv="refresh" content="0; url=/docs/index.html#/home">
++<script>
++  location.replace("/docs/index.html" + (location.hash || "#/home"));
++</script>
++<a href="/docs/index.html#/home">Open the FruitClaw documentation</a>
