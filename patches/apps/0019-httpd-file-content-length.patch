@@ -1,0 +1,19 @@
+diff --git a/netutils/webserver/httpd.c b/netutils/webserver/httpd.c
+--- a/netutils/webserver/httpd.c
++++ b/netutils/webserver/httpd.c
+@@ -1031,7 +1031,14 @@
+ #endif
+ 
+ #ifdef CONFIG_NETUTILS_HTTPD_DIRLIST
+-  if (httpd_send_headers(pstate, 200, -1) != OK)
++  /* Directory listings have a dynamic length, but enabling directory-list
++   * support must not discard the known length of ordinary static files.
++   */
++
++  if (httpd_send_headers(pstate,
++                         pstate->ht_file.fd >= 0 &&
++                         pstate->ht_file.len == 0 ? 204 : 200,
++                         pstate->ht_file.fd >= 0 ? pstate->ht_file.len : -1) != OK)
+     {
+       goto done;
+     }

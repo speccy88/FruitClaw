@@ -31,7 +31,7 @@
       "networking": "none",
       "esp32c6_dependency": false,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "pending",
         "notes": [
           "Derived from the previously working Fruit Jam USB NSH/Berry profile; the reduced profile requires clean-build and board smoke validation."
@@ -50,7 +50,7 @@
       "networking": "none",
       "esp32c6_dependency": false,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "pending",
         "notes": [
           "Seeded from the prior Pico 2 W USB console profile; Berry, vi, I2C and watchdog additions require validation."
@@ -69,13 +69,13 @@
       "networking": "esp-hosted-mcu",
       "esp32c6_dependency": true,
       "validation": {
-        "build": "pending",
-        "hardware": "pending",
+        "build": "passed",
+        "hardware": "passed",
         "notes": [
-          "Requires the pinned ESP32-C6 ESP-Hosted-MCU companion firmware and post-migration wlan0 validation."
+          "2026-07-12: Fruit Jam hardware passed the 16-check network service audit, mixed 2 MiB FTP plus 200-request HTTP stress, ping, wget, NTP, and netcat with zero transport, driver, or TCP allocation failures."
         ]
       },
-      "summary": "Minimal profile plus ESP-Hosted wlan0, DHCP/DNS, FTP, HTTP, ping, NTP, netcat, telnet, wget and WAPI utilities."
+      "summary": "Minimal profile plus compile-time-selectable SPI or PIO microSD at /mnt/sd0, ESP-Hosted wlan0, DHCP/DNS, FTP, HTTP, ping, NTP, netcat, telnet, wget and WAPI utilities."
     },
     {
       "id": "pico-2-w-network",
@@ -88,7 +88,7 @@
       "networking": "cyw43439",
       "esp32c6_dependency": false,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "pending",
         "notes": [
           "CYW43439 GSPI association, DHCP and sustained traffic remain live-hardware validation items; no SSID or passphrase is embedded."
@@ -107,7 +107,7 @@
       "networking": "esp-hosted-mcu",
       "esp32c6_dependency": true,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "previously-validated",
         "notes": [
           "The source profile previously worked on hardware; the thin-wrapper migration still requires regression validation."
@@ -126,7 +126,7 @@
       "networking": "none",
       "esp32c6_dependency": false,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "partial",
         "notes": [
           "NXDoom keyboard input was previously working.",
@@ -146,7 +146,7 @@
       "networking": "esp-hosted-mcu",
       "esp32c6_dependency": true,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "previously-validated-components",
         "notes": [
           "The constituent Fruit Jam drivers previously worked in broader images; the independent full profile requires matrix regression testing."
@@ -165,7 +165,7 @@
       "networking": "esp-hosted-mcu",
       "esp32c6_dependency": true,
       "validation": {
-        "build": "pending",
+        "build": "passed",
         "hardware": "previously-validated-components",
         "notes": [
           "FruitClaw owns /dev/watchdog0 through its session guard in this profile; the generic watchdog service is deliberately disabled.",

@@ -1,0 +1,115 @@
+diff --git a/netutils/ftpd/ftpd.c b/netutils/ftpd/ftpd.c
+--- a/netutils/ftpd/ftpd.c
++++ b/netutils/ftpd/ftpd.c
+@@ -116,7 +116,9 @@
+ 
+ /* Socket helpers */
+ 
+-static int ftpd_rxpoll(int sd, int timeout);
++static bool ftpd_isshutdown(FAR struct ftpd_session_s *session);
++static int ftpd_rxpoll(FAR struct ftpd_session_s *session, int sd,
++                       int timeout);
+ static int ftpd_txpoll(int sd, int timeout);
+ static int ftpd_retry_deadline(int timeout, FAR int64_t *deadline);
+ static int ftpd_retry_wait(int timeout, int64_t deadline);
+@@ -128,7 +130,8 @@
+                            int timeout);
+ static int ftpd_connect(int sd, FAR const struct sockaddr *addr,
+                         socklen_t addrlen, int timeout);
+-static ssize_t ftpd_recv(int sd, FAR void *data, size_t size, int timeout);
++static ssize_t ftpd_recv(FAR struct ftpd_session_s *session, int sd,
++                         FAR void *data, size_t size, int timeout);
+ static ssize_t ftpd_send(int sd, FAR const void *data, size_t size,
+                          int timeout);
+ static ssize_t ftpd_response(int sd, int timeout, FAR const char *fmt, ...)
+@@ -918,10 +921,25 @@
+ }
+ 
+ /****************************************************************************
++ * Name: ftpd_isshutdown
++ ****************************************************************************/
++
++static bool ftpd_isshutdown(FAR struct ftpd_session_s *session)
++{
++  bool shutdown;
++
++  pthread_mutex_lock(&session->lock);
++  shutdown = session->shutdown;
++  pthread_mutex_unlock(&session->lock);
++  return shutdown;
++}
++
++/****************************************************************************
+  * Name: ftpd_rxpoll
+  ****************************************************************************/
+ 
+-static int ftpd_rxpoll(int sd, int timeout)
++static int ftpd_rxpoll(FAR struct ftpd_session_s *session, int sd,
++                       int timeout)
+ {
+   struct pollfd fds[1];
+   int interval = CONFIG_FTPD_POLL_INTERVAL_MS;
+@@ -960,6 +978,11 @@
+   remaining = timeout;
+   do
+     {
++      if (ftpd_isshutdown(session))
++        {
++          return -ESHUTDOWN;
++        }
++
+       if (interval <= 0)
+         {
+           slice = remaining;
+@@ -977,6 +1000,11 @@
+       ret = poll(fds, 1, slice);
+       if (ret < 0 && (errno == EBUSY || errno == EAGAIN))
+         {
++          if (ftpd_isshutdown(session))
++            {
++              return -ESHUTDOWN;
++            }
++
+           ret = ftpd_retry_wait(timeout, deadline);
+           if (ret < 0)
+             {
+@@ -1392,7 +1420,8 @@
+  * Name: ftpd_recv
+  ****************************************************************************/
+ 
+-static ssize_t ftpd_recv(int sd, FAR void *data, size_t size, int timeout)
++static ssize_t ftpd_recv(FAR struct ftpd_session_s *session, int sd,
++                         FAR void *data, size_t size, int timeout)
+ {
+   ssize_t ret;
+   int status;
+@@ -1402,7 +1431,7 @@
+    * often enough to observe lifecycle shutdown.
+    */
+ 
+-  status = ftpd_rxpoll(sd, timeout);
++  status = ftpd_rxpoll(session, sd, timeout);
+   if (status < 0)
+     {
+       ninfo("ftpd_rxpoll: %d\n", status);
+@@ -2615,8 +2644,9 @@
+            * error condition.
+            */
+ 
+-          rdbytes = ftpd_recv(session->data.sd, session->data.buffer,
+-                              wantsize, session->datatimeout);
++          rdbytes = ftpd_recv(session, session->data.sd,
++                              session->data.buffer, wantsize,
++                              session->datatimeout);
+           if (rdbytes < 0)
+             {
+               errval = -rdbytes;
+@@ -4902,7 +4932,7 @@
+               break;
+             }
+ 
+-          recvbytes = ftpd_recv(session->cmd.sd,
++          recvbytes = ftpd_recv(session, session->cmd.sd,
+                                 session->cmd.buffer + buffered,
+                                 session->cmd.buflen - buffered - 1,
+                                 session->rxtimeout);

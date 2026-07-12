@@ -1,0 +1,765 @@
+diff --git a/netutils/ftpd/Kconfig b/netutils/ftpd/Kconfig
+--- a/netutils/ftpd/Kconfig
++++ b/netutils/ftpd/Kconfig
+@@ -6,9 +6,10 @@
+ config NETUTILS_FTPD
+ 	bool "FTP server"
+ 	default n
+-	depends on NET_TCP
++	depends on NET_TCP && NET_TCPBACKLOG
+ 	---help---
+-		Enable support for the FTP server.
++		Enable support for the FTP server.  TCP backlog support is required
++		for non-blocking listener accept and bounded service shutdown.
+ 
+ if NETUTILS_FTPD
+ 
+diff --git a/netutils/ftpd/ftpd.c b/netutils/ftpd/ftpd.c
+--- a/netutils/ftpd/ftpd.c
++++ b/netutils/ftpd/ftpd.c
+@@ -58,6 +58,7 @@
+ #include <libgen.h>
+ #include <assert.h>
+ #include <errno.h>
++#include <time.h>
+ #include <nuttx/debug.h>
+ #include <nuttx/compiler.h>
+ 
+@@ -80,6 +81,7 @@
+  */
+ 
+ #define FTPD_SHUTDOWN_POLL_INTERVAL_MS 250
++#define FTPD_ACCEPT_RETRY_DELAY_MS      10
+ 
+ /****************************************************************************
+  * Private Function Prototypes
+@@ -116,8 +118,8 @@
+ 
+ static int ftpd_rxpoll(int sd, int timeout);
+ static int ftpd_txpoll(int sd, int timeout);
+-static int ftpd_accept(int sd, FAR void *addr, FAR socklen_t *addrlen,
+-                        int timeout);
++static int ftpd_retry_deadline(int timeout, FAR int64_t *deadline);
++static int ftpd_retry_wait(int timeout, int64_t deadline);
+ static int ftpd_serveraccept(FAR struct ftpd_server_s *server,
+                              FAR void *addr, FAR socklen_t *addrlen,
+                              int timeout);
+@@ -923,10 +925,28 @@
+ {
+   struct pollfd fds[1];
+   int interval = CONFIG_FTPD_POLL_INTERVAL_MS;
++  int64_t deadline;
+   int remaining;
+   int slice;
+   int ret;
++
++  /* Lifecycle shutdown must get a chance to tear down and recreate the
++   * NuttX poll callback.  A shutdown callback can be ordered after the
++   * already-blocked receive callback, and callback allocation can also
++   * transiently fail.  Re-polling observes the socket shutdown bits.
++   */
++
++  if (interval <= 0 || interval > FTPD_SHUTDOWN_POLL_INTERVAL_MS)
++    {
++      interval = FTPD_SHUTDOWN_POLL_INTERVAL_MS;
++    }
+ 
++  ret = ftpd_retry_deadline(timeout, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   /* Set up the poll */
+ 
+   fds[0].fd      = sd;
+@@ -955,6 +975,17 @@
+ 
+       ftpd_activity_hook("rxpoll-wait");
+       ret = poll(fds, 1, slice);
++      if (ret < 0 && (errno == EBUSY || errno == EAGAIN))
++        {
++          ret = ftpd_retry_wait(timeout, deadline);
++          if (ret < 0)
++            {
++              return ret;
++            }
++
++          continue;
++        }
++
+       if (ret != 0 || timeout == 0 || interval <= 0)
+         {
+           break;
+@@ -997,10 +1028,26 @@
+ {
+   struct pollfd fds[1];
+   int interval = CONFIG_FTPD_POLL_INTERVAL_MS;
++  int64_t deadline;
+   int remaining;
+   int slice;
+   int ret;
+ 
++  /* See ftpd_rxpoll(): no socket wait may outlive the lifecycle polling
++   * bound, even when the optional activity-hook interval is disabled.
++   */
++
++  if (interval <= 0 || interval > FTPD_SHUTDOWN_POLL_INTERVAL_MS)
++    {
++      interval = FTPD_SHUTDOWN_POLL_INTERVAL_MS;
++    }
++
++  ret = ftpd_retry_deadline(timeout, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   /* Set up the poll */
+ 
+   fds[0].fd      = sd;
+@@ -1029,6 +1076,17 @@
+ 
+       ftpd_activity_hook("txpoll-wait");
+       ret = poll(fds, 1, slice);
++      if (ret < 0 && (errno == EBUSY || errno == EAGAIN))
++        {
++          ret = ftpd_retry_wait(timeout, deadline);
++          if (ret < 0)
++            {
++              return ret;
++            }
++
++          continue;
++        }
++
+       if (ret != 0 || timeout == 0 || interval <= 0)
+         {
+           break;
+@@ -1065,48 +1123,90 @@
+ }
+ 
+ /****************************************************************************
+- * Name: ftpd_accept
++ * Name: ftpd_retry_deadline
+  ****************************************************************************/
+ 
+-static int ftpd_accept(int sd, FAR void *addr, FAR socklen_t *addrlen,
+-                       int timeout)
++static int ftpd_retry_deadline(int timeout, FAR int64_t *deadline)
+ {
+-  int acceptsd;
+-  int ret;
++  struct timespec now;
+ 
+-  /* Handle any requested timeout */
++  *deadline = 0;
++  if (timeout <= 0)
++    {
++      return OK;
++    }
+ 
+-  if (timeout >= 0)
++  if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+     {
+-      ret = ftpd_rxpoll(sd, timeout);
+-      if (ret < 0)
+-        {
+-          /* Only report interesting,
+-           * infrequent errors (not the common timeout)
+-           */
++      return -errno;
++    }
+ 
+-#ifdef CONFIG_DEBUG_NET
+-          if (ret != -ETIMEDOUT)
+-            {
+-              nerr("ERROR: ftpd_rxpoll() failed: %d\n", ret);
+-            }
+-#endif
+-
+-          return ret;
+-        }
++  *deadline = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++  if (INT64_MAX - *deadline < timeout)
++    {
++      *deadline = INT64_MAX;
+     }
++  else
++    {
++      *deadline += timeout;
++    }
+ 
+-  /* Accept the connection -- waiting if necessary */
++  return OK;
++}
+ 
+-  acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen, SOCK_CLOEXEC);
+-  if (acceptsd < 0)
++/****************************************************************************
++ * Name: ftpd_retry_wait
++ ****************************************************************************/
++
++static int ftpd_retry_wait(int timeout, int64_t deadline)
++{
++  struct timespec delay;
++  struct timespec now;
++  int64_t remaining;
++  int delay_ms = FTPD_ACCEPT_RETRY_DELAY_MS;
++
++  if (timeout == 0)
+     {
+-      int errval = errno;
+-      nerr("ERROR: accept() failed: %d\n", errval);
+-      return -errval;
++      return -ETIMEDOUT;
+     }
+ 
+-  return acceptsd;
++  if (timeout > 0)
++    {
++      if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
++        {
++          return -errno;
++        }
++
++      remaining = deadline -
++                  ((int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000);
++      if (remaining <= 0)
++        {
++          return -ETIMEDOUT;
++        }
++
++      if (remaining < delay_ms)
++        {
++          delay_ms = (int)remaining;
++        }
++    }
++
++  /* Keep board transports and watchdog hooks alive while avoiding a hot
++   * socket retry loop.  nanosleep() resumes its unelapsed delay after EINTR
++   * so an interrupt storm cannot turn this into a busy spin.
++   */
++
++  ftpd_activity_hook("rxpoll-wait");
++  delay.tv_sec  = 0;
++  delay.tv_nsec = delay_ms * 1000000L;
++  while (nanosleep(&delay, &delay) < 0)
++    {
++      if (errno != EINTR)
++        {
++          return -errno;
++        }
++    }
++
++  return OK;
+ }
+ 
+ /****************************************************************************
+@@ -1117,12 +1217,17 @@
+                              FAR void *addr, FAR socklen_t *addrlen,
+                              int timeout)
+ {
+-  int remaining = timeout;
++  int64_t deadline;
+   int acceptsd;
+-  int slice;
+   int sd;
+   int ret;
+ 
++  ret = ftpd_retry_deadline(timeout, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   for (; ; )
+     {
+       pthread_mutex_lock(&server->lock);
+@@ -1133,59 +1238,33 @@
+         }
+ 
+       sd = server->sd;
+-      pthread_mutex_unlock(&server->lock);
+-
+-      if (remaining < 0 || remaining > FTPD_SHUTDOWN_POLL_INTERVAL_MS)
++      acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen,
++                         SOCK_CLOEXEC);
++      if (acceptsd < 0)
+         {
+-          slice = FTPD_SHUTDOWN_POLL_INTERVAL_MS;
+-        }
+-      else
+-        {
+-          slice = remaining;
+-        }
++          ret = -errno;
++          pthread_mutex_unlock(&server->lock);
+ 
+-      ret = ftpd_rxpoll(sd, slice);
+-      if (ret == -ETIMEDOUT)
+-        {
+-          if (timeout == 0)
+-            {
+-              return ret;
+-            }
++          /* NuttX listener poll readiness can remain asserted after an
++           * aborted peer, and can also miss a connection already queued in
++           * the backlog.  Drive the deliberately non-blocking listener
++           * directly with a short sleep so neither condition can spin or
++           * strand a real connection without a banner.
++           */
+ 
+-          if (remaining > 0)
++          if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK ||
++              ret == -ECONNABORTED || ret == -ECONNRESET ||
++              ret == -ENOTCONN || ret == -EPROTO)
+             {
+-              remaining -= slice;
+-              if (remaining <= 0)
++              ret = ftpd_retry_wait(timeout, deadline);
++              if (ret < 0)
+                 {
+                   return ret;
+                 }
+-            }
+ 
+-          continue;
+-        }
+-      else if (ret < 0)
+-        {
+-          return ret;
+-        }
+-
+-      /* Serialize the shutdown check and accept.  The listen socket is
+-       * non-blocking, so this lock cannot be held across an indefinite
+-       * accept if another caller consumed the pending connection.
+-       */
+-
+-      pthread_mutex_lock(&server->lock);
+-      if (server->shutdown || server->sd != sd)
+-        {
+-          pthread_mutex_unlock(&server->lock);
+-          return -ESHUTDOWN;
+-        }
++              continue;
++            }
+ 
+-      acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen,
+-                         SOCK_CLOEXEC);
+-      if (acceptsd < 0)
+-        {
+-          ret = -errno;
+-          pthread_mutex_unlock(&server->lock);
+           return ret;
+         }
+ 
+@@ -1202,10 +1281,16 @@
+                            FAR void *addr, FAR socklen_t *addrlen,
+                            int timeout)
+ {
+-  int remaining = timeout;
+-  int slice;
++  int64_t deadline;
++  int acceptsd;
+   int ret;
+ 
++  ret = ftpd_retry_deadline(timeout, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   for (; ; )
+     {
+       pthread_mutex_lock(&session->lock);
+@@ -1215,36 +1300,25 @@
+           return -ESHUTDOWN;
+         }
+ 
++      acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen,
++                         SOCK_CLOEXEC);
++      ret = acceptsd < 0 ? -errno : acceptsd;
+       pthread_mutex_unlock(&session->lock);
+ 
+-      if (remaining < 0 || remaining > FTPD_SHUTDOWN_POLL_INTERVAL_MS)
++      if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK ||
++          ret == -ECONNABORTED || ret == -ECONNRESET ||
++          ret == -ENOTCONN || ret == -EPROTO)
+         {
+-          slice = FTPD_SHUTDOWN_POLL_INTERVAL_MS;
+-        }
+-      else
+-        {
+-          slice = remaining;
+-        }
+-
+-      ret = ftpd_accept(sd, addr, addrlen, slice);
+-      if (ret != -ETIMEDOUT)
+-        {
+-          return ret;
+-        }
+-
+-      if (timeout == 0)
+-        {
+-          return ret;
+-        }
+-
+-      if (remaining > 0)
+-        {
+-          remaining -= slice;
+-          if (remaining <= 0)
++          ret = ftpd_retry_wait(timeout, deadline);
++          if (ret < 0)
+             {
+               return ret;
+             }
++
++          continue;
+         }
++
++      return ret;
+     }
+ }
+ 
+@@ -1323,16 +1397,16 @@
+   ssize_t ret;
+   int status;
+ 
+-  /* Handle any requested timetout */
++  /* Always poll first, including for an unlimited caller timeout.  The poll
++   * helper keeps unlimited semantics while re-registering its NuttX callback
++   * often enough to observe lifecycle shutdown.
++   */
+ 
+-  if (timeout >= 0)
++  status = ftpd_rxpoll(sd, timeout);
++  if (status < 0)
+     {
+-      status = ftpd_rxpoll(sd, timeout);
+-      if (status < 0)
+-        {
+-          ninfo("ftpd_rxpoll: %d\n", status);
+-          return (ssize_t)status;
+-        }
++      ninfo("ftpd_rxpoll: %d\n", status);
++      return (ssize_t)status;
+     }
+ 
+   /* Receive the data... waiting if necessary.
+@@ -1367,16 +1441,15 @@
+ 
+   while (total < size)
+     {
+-      /* Handle any requested timeout */
++      /* Always poll, even when the caller requested no overall timeout.
++       * Bounded callback re-registration is part of the shutdown contract.
++       */
+ 
+-      if (timeout >= 0)
++      int status = ftpd_txpoll(sd, timeout);
++      if (status < 0)
+         {
+-          int status = ftpd_txpoll(sd, timeout);
+-          if (status < 0)
+-            {
+-              ninfo("ftpd_txpoll: %d\n", status);
+-              return (ssize_t)status;
+-            }
++          ninfo("ftpd_txpoll: %d\n", status);
++          return (ssize_t)status;
+         }
+ 
+       /* Then send the data (waiting if necessary) */
+@@ -1466,6 +1539,23 @@
+     }
+ 
+   return ret;
++}
++
++/****************************************************************************
++ * Name: ftpd_setnonblocking
++ ****************************************************************************/
++
++static int ftpd_setnonblocking(int sd)
++{
++  int flags;
++
++  flags = fcntl(sd, F_GETFL, 0);
++  if (flags < 0 || fcntl(sd, F_SETFL, flags | O_NONBLOCK) < 0)
++    {
++      return -errno;
++    }
++
++  return OK;
+ }
+ 
+ /****************************************************************************
+@@ -2336,6 +2426,7 @@
+   FAR char *abspath;
+   FAR char *path;
+   bool isnew;
++  bool transfer_failed = false;
+   int oflags;
+   FAR char *buffer;
+   size_t buflen;
+@@ -2355,9 +2446,13 @@
+   ret = ftpd_getpath(session, session->param, &abspath, NULL);
+   if (ret < 0)
+     {
+-      ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 550, ' ', "Stream error !");
+-      goto errout;
++      /* A rejected or invalid path is an FTP command error, not a broken
++       * control connection.  Return the reply result so the worker keeps
++       * processing subsequent commands when the 550 response was sent.
++       */
++
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 550, ' ', "Stream error !");
+     }
+ 
+   path = abspath;
+@@ -2420,9 +2515,8 @@
+ 
+   if (session->fd < 0)
+     {
+-      ret = -errno;
+-      ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 550, ' ', "Can not open file !");
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 550, ' ', "Can not open file !");
+       goto errout_with_data;
+     }
+ 
+@@ -2472,9 +2566,9 @@
+ 
+       if (seekoffs < 0)
+         {
+-          ftpd_response(session->cmd.sd, session->txtimeout,
+-                        g_respfmt1, 550, ' ', "Can not seek file !");
+-          ret = -errval;
++          transfer_failed = true;
++          ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                              g_respfmt1, 550, ' ', "Can not seek file !");
+           goto errout_with_session;
+         }
+     }
+@@ -2486,6 +2580,7 @@
+   if (ret < 0)
+     {
+       nerr("ERROR: ftpd_response failed: %d\n", ret);
++      transfer_failed = true;
+       goto errout_with_session;
+     }
+ 
+@@ -2536,9 +2631,9 @@
+         {
+           nerr("ERROR: Read failed: rdbytes=%zu errval=%d\n",
+                rdbytes, errval);
+-          ftpd_response(session->cmd.sd, session->txtimeout,
+-                        g_respfmt1, 550, ' ', "Data read error !");
+-          ret = -errval;
++          transfer_failed = true;
++          ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                              g_respfmt1, 550, ' ', "Data read error !");
+           break;
+         }
+ 
+@@ -2550,12 +2645,8 @@
+         {
+           /* End-of-file */
+ 
+-          ftpd_response(session->cmd.sd, session->txtimeout,
+-                        g_respfmt1, 226, ' ', "Transfer complete");
+-
+-          /* Return success */
+-
+-          ret = 0;
++          ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                              g_respfmt1, 226, ' ', "Transfer complete");
+           break;
+         }
+ 
+@@ -2634,9 +2725,9 @@
+         {
+           nerr("ERROR: Write failed: wrbytes=%zu errval=%d\n",
+                wrbytes, errval);
+-          ftpd_response(session->cmd.sd, session->txtimeout,
+-                        g_respfmt1, 550, ' ', "Data send error !");
+-          ret = -errval;
++          transfer_failed = true;
++          ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                              g_respfmt1, 550, ' ', "Data send error !");
+           break;
+         }
+     }
+@@ -2645,7 +2736,7 @@
+     close(session->fd);
+     session->fd = -1;
+ 
+-    if (isnew && ret < 0)
++    if (isnew && transfer_failed)
+       {
+         unlink(path);
+       }
+@@ -2656,7 +2747,6 @@
+ errout_with_path:
+     free(abspath);
+ 
+-errout:
+     return ret;
+ }
+ 
+@@ -3697,6 +3787,15 @@
+       return ftpd_response(session->cmd.sd, session->txtimeout,
+                            g_respfmt1, 425, ' ',
+                            "PASV socket create fail !");
++    }
++
++  ret = ftpd_setnonblocking(sd);
++  if (ret < 0)
++    {
++      close(sd);
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 425, ' ',
++                           "PASV non-blocking setup fail !");
+     }
+ 
+   ret = ftpd_dataassign(session, sd);
+@@ -3841,6 +3940,15 @@
+       return ret;
+     }
+ 
++  ret = ftpd_setnonblocking(sd);
++  if (ret < 0)
++    {
++      close(sd);
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 500, ' ',
++                           "EPSV non-blocking setup fail !");
++    }
++
+   ret = ftpd_dataassign(session, sd);
+   if (ret < 0)
+     {
+@@ -5223,16 +5331,11 @@
+     {
+       server->shutdown = true;
+ 
+-      /* shutdown() prevents new connections immediately.  The bounded
+-       * polling in ftpd_serveraccept() observes the lifecycle flag without
+-       * racing close() against a descriptor currently registered in poll().
++      /* Do not call shutdown() on the listening socket.  This NuttX TCP
++       * revision rejects shutdown() on a listener with EBADF.  The bounded
++       * polling in ftpd_serveraccept() observes the lifecycle flag within
++       * 250 ms without racing close() against a descriptor in poll().
+        */
+-
+-      if (server->sd >= 0 && shutdown(server->sd, SHUT_RDWR) < 0 &&
+-          errno != ENOTCONN)
+-        {
+-          ret = -errno;
+-        }
+     }
+ 
+   /* Established control/data sockets are never closed from this thread.
+@@ -5250,12 +5353,20 @@
+ 
+       if (session->cmd.sd >= 0)
+         {
+-          shutdown(session->cmd.sd, SHUT_RDWR);
++          if (shutdown(session->cmd.sd, SHUT_RDWR) < 0 &&
++              errno != ENOTCONN && errno != EBADF && ret == OK)
++            {
++              ret = -errno;
++            }
+         }
+ 
+       if (session->data.sd >= 0)
+         {
+-          shutdown(session->data.sd, SHUT_RDWR);
++          if (shutdown(session->data.sd, SHUT_RDWR) < 0 &&
++              errno != ENOTCONN && errno != EBADF && ret == OK)
++            {
++              ret = -errno;
++            }
+         }
+ 
+       pthread_mutex_unlock(&session->lock);
+diff --git a/examples/ftpd/ftpd.h b/examples/ftpd/ftpd.h
+--- a/examples/ftpd/ftpd.h
++++ b/examples/ftpd/ftpd.h
+@@ -121,6 +121,7 @@
+ {
+   bool          initialized; /* Network initialization completed */
+   bool          starting;    /* Daemon task creation is in progress */
++  bool          stopping;    /* A stop caller owns this generation */
+   bool          stop;        /* True: Request daemon to exit */
+   bool          running;     /* True: The daemon is running */
+   pid_t         pid;         /* Task ID, or -1 when inactive */
+diff --git a/examples/ftpd/ftpd_main.c b/examples/ftpd/ftpd_main.c
+--- a/examples/ftpd/ftpd_main.c
++++ b/examples/ftpd/ftpd_main.c
+@@ -318,7 +318,6 @@
+   g_ftpdglob.handle  = NULL;
+   g_ftpdglob.starting = false;
+   g_ftpdglob.running = false;
+-  g_ftpdglob.stop    = false;
+   g_ftpdglob.pid     = -1;
+   pthread_cond_broadcast(&g_ftpdcond);
+   pthread_mutex_unlock(&g_ftpdlock);
+@@ -353,6 +352,7 @@
+ 
+       g_ftpdglob.initialized = true;
+       g_ftpdglob.starting    = false;
++      g_ftpdglob.stopping    = false;
+       g_ftpdglob.pid         = -1;
+       g_ftpdglob.stop        = false;
+       g_ftpdglob.running     = false;
+@@ -361,7 +361,7 @@
+ 
+   /* Then start the new daemon (if it is not already running) */
+ 
+-  if (g_ftpdglob.stop && (g_ftpdglob.starting || g_ftpdglob.running))
++  if (g_ftpdglob.stopping)
+     {
+       printf("Waiting for FTP daemon [%d] to stop\n", g_ftpdglob.pid);
+       pthread_mutex_unlock(&g_ftpdlock);
+@@ -416,6 +416,13 @@
+   int ret = OK;
+ 
+   pthread_mutex_lock(&g_ftpdlock);
++  if (g_ftpdglob.stopping)
++    {
++      printf("The FTP daemon is already stopping\n");
++      pthread_mutex_unlock(&g_ftpdlock);
++      return EXIT_FAILURE;
++    }
++
+   if (!g_ftpdglob.initialized ||
+       (!g_ftpdglob.starting && !g_ftpdglob.running))
+     {
+@@ -426,6 +433,7 @@
+ 
+   pid = g_ftpdglob.pid;
+   printf("Stopping the FTP daemon, pid=%d\n", pid);
++  g_ftpdglob.stopping = true;
+   g_ftpdglob.stop = true;
+ 
+   if (g_ftpdglob.handle != NULL)
+@@ -438,10 +446,13 @@
+       pthread_cond_wait(&g_ftpdcond, &g_ftpdlock);
+     }
+ 
++  g_ftpdglob.stop = false;
++  g_ftpdglob.stopping = false;
++  pthread_cond_broadcast(&g_ftpdcond);
+   pthread_mutex_unlock(&g_ftpdlock);
+   if (ret < 0)
+     {
+-      printf("FTP daemon [%d] listener shutdown returned %d\n", pid, ret);
++      printf("FTP daemon [%d] socket shutdown returned %d\n", pid, ret);
+     }
+ 
+   printf("FTP daemon [%d] stopped\n", pid);

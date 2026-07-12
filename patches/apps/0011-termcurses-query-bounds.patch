@@ -1,0 +1,61 @@
+diff --git a/system/termcurses/tcurses_vt100.c b/system/termcurses/tcurses_vt100.c
+--- a/system/termcurses/tcurses_vt100.c
++++ b/system/termcurses/tcurses_vt100.c
+@@ -1037,7 +1037,8 @@
+     {
+       /* Perform a read */
+ 
+-      ret = read(in_fd, &resp[len], sizeof(resp) - len);
++      ret = read(in_fd, &resp[len],
++                 sizeof(priv->keybuf) - 1 - len);
+       if (ret > 0)
+         {
+           len += ret;
+@@ -1067,10 +1068,17 @@
+               for (digits = 0; pos < len && resp[pos] >= '0' &&
+                    resp[pos] <= '9'; digits++, pos++)
+                 {
++                  if (digits >= 5)
++                    {
++                      digits = 0;
++                      break;
++                    }
++
+                   row = row * 10 + resp[pos] - '0';
+                 }
+ 
+-              if (digits == 0 || pos >= len || resp[pos++] != ';')
++              if (digits == 0 || row > UINT16_MAX || pos >= len ||
++                  resp[pos++] != ';')
+                 {
+                   continue;
+                 }
+@@ -1078,11 +1086,17 @@
+               for (digits = 0; pos < len && resp[pos] >= '0' &&
+                    resp[pos] <= '9'; digits++, pos++)
+                 {
++                  if (digits >= 5)
++                    {
++                      digits = 0;
++                      break;
++                    }
++
+                   col = col * 10 + resp[pos] - '0';
+                 }
+ 
+-              if (digits == 0 || pos >= len || resp[pos] != 'R' ||
+-                  row <= 0 || col <= 0)
++              if (digits == 0 || col > UINT16_MAX || pos >= len ||
++                  resp[pos] != 'R' || row <= 0 || col <= 0)
+                 {
+                   continue;
+                 }
+@@ -1097,7 +1111,7 @@
+             }
+         }
+ 
+-      if ((size_t)len == sizeof(resp))
++      if ((size_t)len == sizeof(priv->keybuf) - 1)
+         {
+           break;
+         }

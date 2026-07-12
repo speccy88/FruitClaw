@@ -4,3 +4,11 @@
 0004-rp23xx-esp-hosted-integration.patch
 0005-network-hardening.patch
 0006-pico2w-cyw43439-integration.patch
+0007-cdcacm-direct-tx-backpressure.patch
+0008-network-runtime-fixes.patch
+0009-tcp-reuseaddr-listener-restart.patch
+0010-telnet-transient-send-retry.patch
+0011-telnet-nxstyle.patch
+0012-netdev-bound-deferred-tx-poll.patch
+0013-netdev-interleave-deferred-rx.patch
+0014-rp23xx-pio-sdio-support.patch

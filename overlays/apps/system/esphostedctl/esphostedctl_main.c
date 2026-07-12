@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <nuttx/net/tcp.h>
 #include <nuttx/wireless/esp_hosted.h>
 
 /****************************************************************************
@@ -58,6 +59,9 @@ static void esphostedctl_print_section(FAR const char *name)
 int main(int argc, FAR char *argv[])
 {
   struct esp_hosted_stats_s stats;
+#ifdef CONFIG_NET_TCP_WRITE_BUFFERS
+  struct tcp_sendbuffer_diag_s tcpdiag;
+#endif
   int ret;
 
   ret = esp_hosted_spi_get_stats(&stats);
@@ -168,6 +172,26 @@ int main(int argc, FAR char *argv[])
   esphostedctl_print_counter("rx_dropped", stats.netdev_rx_dropped_count);
   esphostedctl_print_counter("rx_echo_dropped",
                              stats.netdev_rx_echo_dropped_count);
+
+#ifdef CONFIG_NET_TCP_WRITE_BUFFERS
+  tcp_sendbuffer_diag(&tcpdiag);
+  esphostedctl_print_section("tcp_send");
+  esphostedctl_print_counter("wrbuffer_available",
+                             tcp_wrbuffer_navail());
+  esphostedctl_print_counter("calls", tcpdiag.send_calls);
+  esphostedctl_print_counter("ok", tcpdiag.send_ok);
+  esphostedctl_print_counter("eagain", tcpdiag.send_eagain);
+  esphostedctl_print_counter("callback_alloc_fail",
+                             tcpdiag.callback_alloc_fail);
+  esphostedctl_print_counter("wrbuffer_alloc_fail",
+                             tcpdiag.wrbuffer_alloc_fail);
+  esphostedctl_print_counter("iob_copy_fail", tcpdiag.iob_copy_fail);
+  esphostedctl_print_counter("txnotify", tcpdiag.txnotify_calls);
+  esphostedctl_print_counter("queued_bytes", tcpdiag.queued_bytes);
+  printf("  %-32s %" PRId32 "\n", "last_ret", tcpdiag.last_ret);
+  esphostedctl_print_counter("last_flags", tcpdiag.last_flags);
+  esphostedctl_print_counter("last_nonblock", tcpdiag.last_nonblock);
+#endif
 
   return EXIT_SUCCESS;
 }

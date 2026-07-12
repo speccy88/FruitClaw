@@ -6,7 +6,22 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/lib/common.sh"
 
 ROOT=$(nr_root)
-WORK=${NUTTX_RP2350_PATCH_CHECK_WORK:-$ROOT/build/check-patches/$$}
+CLEAN_WORK=0
+if [[ -n ${NUTTX_RP2350_PATCH_CHECK_WORK:-} ]]; then
+  WORK=$NUTTX_RP2350_PATCH_CHECK_WORK
+else
+  nr_require_tool mktemp
+  TEMP_ROOT=${TMPDIR:-/tmp}
+  WORK=$(mktemp -d "${TEMP_ROOT%/}/nuttx-rp2350-check-patches.XXXXXX")
+  CLEAN_WORK=1
+fi
+
+cleanup() {
+  if ((CLEAN_WORK)); then
+    rm -rf -- "$WORK"
+  fi
+}
+trap cleanup EXIT
 
 check_series_inventory() {
   local label=$1
@@ -69,7 +84,9 @@ for source in nuttx apps; do
   [[ -d $ROOT/overlays/$source ]] || nr_die "missing overlays/${source}"
 done
 
-BEFORE_STATUS=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)
+# Validation archives the exact locked commits below.  Snapshot only wrapper
+# state without opening the large submodule repositories.
+BEFORE_STATUS=$(nr_wrapper_state "$ROOT")
 rm -rf "$WORK"
 mkdir -p "$WORK/nuttx" "$WORK/apps"
 
@@ -79,11 +96,16 @@ check_patch_scope
 
 NUTTX_COMMIT=$(nr_lock_commit "$ROOT" nuttx)
 APPS_COMMIT=$(nr_lock_commit "$ROOT" apps)
-nr_ensure_commit "$ROOT" nuttx "$NUTTX_COMMIT" "$(nr_lock_url "$ROOT" nuttx)"
-nr_ensure_commit "$ROOT" apps "$APPS_COMMIT" "$(nr_lock_url "$ROOT" apps)"
+SOURCE_CACHE_ROOT=${NUTTX_RP2350_SOURCE_CACHE:-$ROOT/build/source-cache}
+NUTTX_REPO=$SOURCE_CACHE_ROOT/nuttx.git
+APPS_REPO=$SOURCE_CACHE_ROOT/apps.git
+nr_prepare_source_cache "$NUTTX_REPO" nuttx "$NUTTX_COMMIT" \
+  "$(nr_lock_url "$ROOT" nuttx)"
+nr_prepare_source_cache "$APPS_REPO" apps "$APPS_COMMIT" \
+  "$(nr_lock_url "$ROOT" apps)"
 
-nr_materialize_commit "$ROOT/nuttx" "$NUTTX_COMMIT" "$WORK/nuttx"
-nr_materialize_commit "$ROOT/apps" "$APPS_COMMIT" "$WORK/apps"
+nr_materialize_commit "$NUTTX_REPO" "$NUTTX_COMMIT" "$WORK/nuttx"
+nr_materialize_commit "$APPS_REPO" "$APPS_COMMIT" "$WORK/apps"
 nr_apply_series NuttX "$WORK/nuttx" "$ROOT/patches/nuttx"
 nr_apply_series apps "$WORK/apps" "$ROOT/patches/apps"
 
@@ -103,8 +125,8 @@ grep -F -q "tools\$(DELIM)canonicalize_archive.sh" "$WORK/apps/Makefile" || \
 [[ -x $WORK/apps/tools/canonicalize_archive.sh ]] || \
   nr_die "deterministic libapps archive helper is missing or not executable"
 
-AFTER_STATUS=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)
+AFTER_STATUS=$(nr_wrapper_state "$ROOT")
 [[ $AFTER_STATUS == "$BEFORE_STATUS" ]] || \
-  nr_die "patch validation changed the wrapper or submodule worktrees"
+  nr_die "patch validation changed the wrapper checkout"
 
 nr_note "both ordered patch stacks apply cleanly to their locked upstream commits"

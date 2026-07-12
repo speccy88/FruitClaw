@@ -1,0 +1,1195 @@
+diff --git a/include/netutils/ftpd.h b/include/netutils/ftpd.h
+--- a/include/netutils/ftpd.h
++++ b/include/netutils/ftpd.h
+@@ -54,6 +54,16 @@
+  *     128 bytes.
+  *   CONFIG_FTPD_DATABUFFERSIZE - The size of the I/O buffer for data
+  *     transfers.  Default: 512 bytes.
++ *   CONFIG_FTPD_CONTROL_TIMEOUT_MS - Control connection receive/send
++ *     timeout in milliseconds.  A negative value disables the timeout.
++ *     Default: -1.
++ *   CONFIG_FTPD_DATA_TIMEOUT_MS - Data connection receive/send timeout in
++ *     milliseconds.  A negative value disables the timeout.  Default: -1.
++ *   CONFIG_FTPD_PASV_TIMEOUT_MS - Passive data connection accept timeout in
++ *     milliseconds.  A negative value disables the timeout.  Default: -1.
++ *   CONFIG_FTPD_POLL_INTERVAL_MS - Maximum poll interval used to invoke the
++ *     optional activity hook.  A non-positive value uses one uninterrupted
++ *     poll.  Default: -1.
+  *   CONFIG_FTPD_WORKERSTACKSIZE - The stacksize to allocate for each
+  *     FTP daemon worker thread.  Default:  2048 bytes.
+  */
+@@ -78,6 +88,22 @@
+ #  define CONFIG_FTPD_DATABUFFERSIZE 512
+ #endif
+ 
++#ifndef CONFIG_FTPD_CONTROL_TIMEOUT_MS
++#  define CONFIG_FTPD_CONTROL_TIMEOUT_MS -1
++#endif
++
++#ifndef CONFIG_FTPD_DATA_TIMEOUT_MS
++#  define CONFIG_FTPD_DATA_TIMEOUT_MS -1
++#endif
++
++#ifndef CONFIG_FTPD_PASV_TIMEOUT_MS
++#  define CONFIG_FTPD_PASV_TIMEOUT_MS -1
++#endif
++
++#ifndef CONFIG_FTPD_POLL_INTERVAL_MS
++#  define CONFIG_FTPD_POLL_INTERVAL_MS -1
++#endif
++
+ #ifndef CONFIG_FTPD_WORKERSTACKSIZE
+ #  define CONFIG_FTPD_WORKERSTACKSIZE 2048
+ #endif
+diff --git a/netutils/ftpd/Kconfig b/netutils/ftpd/Kconfig
+--- a/netutils/ftpd/Kconfig
++++ b/netutils/ftpd/Kconfig
+@@ -12,6 +12,50 @@
+ 
+ if NETUTILS_FTPD
+ 
++config FTPD_CMDBUFFERSIZE
++	int "FTPD command buffer size"
++	default 128
++	help
++		Maximum number of bytes retained for one FTP command, including its
++		terminator.  Commands longer than this are rejected.
++
++config FTPD_DATABUFFERSIZE
++	int "FTPD data buffer size"
++	default 512
++	help
++		Per-session buffer used for file transfers and directory listings.
++
++config FTPD_CONTROL_TIMEOUT_MS
++	int "FTPD control idle timeout (milliseconds)"
++	default -1
++	help
++		Maximum time to wait for control-channel input or output.  Set this
++		to -1 to preserve the traditional unlimited wait.
++
++config FTPD_DATA_TIMEOUT_MS
++	int "FTPD data I/O timeout (milliseconds)"
++	default -1
++	help
++		Maximum time to wait for active data connection setup and data input
++		or output.  Set this to -1 for an unlimited wait.
++
++config FTPD_PASV_TIMEOUT_MS
++	int "FTPD passive accept timeout (milliseconds)"
++	default -1
++	help
++		Maximum time to wait for the client to connect to a PASV or EPSV
++		listener after issuing a transfer command.  Set this to -1 for an
++		unlimited wait.
++
++config FTPD_POLL_INTERVAL_MS
++	int "FTPD activity poll interval (milliseconds)"
++	default -1
++	help
++		Maximum interval between calls to ftpd_activity_hook while waiting
++		for a socket.  A non-positive value uses one uninterrupted poll.
++		Boards whose transports need periodic progress may select a bounded
++		value.
++
+ config FTPD_WORKERSTACKSIZE
+ 	int "FTPD server thread stack size"
+ 	default DEFAULT_TASK_STACKSIZE
+diff --git a/netutils/ftpd/ftpd.h b/netutils/ftpd/ftpd.h
+--- a/netutils/ftpd/ftpd.h
++++ b/netutils/ftpd/ftpd.h
+@@ -126,6 +126,8 @@
+   uint8_t                          flags;   /* See TPD_SESSIONFLAG_* definitions */
+   int                              rxtimeout;
+   int                              txtimeout;
++  int                              datatimeout;
++  int                              pasvtimeout;
+ 
+   /* Command */
+ 
+diff --git a/netutils/ftpd/ftpd.c b/netutils/ftpd/ftpd.c
+--- a/netutils/ftpd/ftpd.c
++++ b/netutils/ftpd/ftpd.c
+@@ -106,6 +106,8 @@
+ static int ftpd_txpoll(int sd, int timeout);
+ static int ftpd_accept(int sd, FAR void *addr, FAR socklen_t *addrlen,
+                         int timeout);
++static int ftpd_connect(int sd, FAR const struct sockaddr *addr,
++                        socklen_t addrlen, int timeout);
+ static ssize_t ftpd_recv(int sd, FAR void *data, size_t size, int timeout);
+ static ssize_t ftpd_send(int sd, FAR const void *data, size_t size,
+                          int timeout);
+@@ -114,6 +116,8 @@
+ 
+ static int ftpd_dataopen(FAR struct ftpd_session_s *session);
+ static int ftpd_dataclose(FAR struct ftpd_session_s *session);
++static bool ftpd_datahost_matches(FAR struct ftpd_session_s *session,
++                                  FAR const union ftpd_sockaddr_u *addr);
+ static FAR struct ftpd_server_s *ftpd_openserver(int port,
+                                                  sa_family_t family);
+ 
+@@ -835,7 +839,9 @@
+ static int ftpd_rxpoll(int sd, int timeout)
+ {
+   struct pollfd fds[1];
++  int interval = CONFIG_FTPD_POLL_INTERVAL_MS;
+   int remaining;
++  int slice;
+   int ret;
+ 
+   /* Set up the poll */
+@@ -851,11 +857,22 @@
+   remaining = timeout;
+   do
+     {
+-      int slice = timeout < 0 ? 10 : remaining > 10 ? 10 : remaining;
++      if (interval <= 0)
++        {
++          slice = remaining;
++        }
++      else if (remaining < 0 || remaining > interval)
++        {
++          slice = interval;
++        }
++      else
++        {
++          slice = remaining;
++        }
+ 
+       ftpd_activity_hook("rxpoll-wait");
+       ret = poll(fds, 1, slice);
+-      if (ret != 0 || timeout == 0)
++      if (ret != 0 || timeout == 0 || interval <= 0)
+         {
+           break;
+         }
+@@ -896,7 +913,9 @@
+ static int ftpd_txpoll(int sd, int timeout)
+ {
+   struct pollfd fds[1];
++  int interval = CONFIG_FTPD_POLL_INTERVAL_MS;
+   int remaining;
++  int slice;
+   int ret;
+ 
+   /* Set up the poll */
+@@ -912,11 +931,22 @@
+   remaining = timeout;
+   do
+     {
+-      int slice = timeout < 0 ? 10 : remaining > 10 ? 10 : remaining;
++      if (interval <= 0)
++        {
++          slice = remaining;
++        }
++      else if (remaining < 0 || remaining > interval)
++        {
++          slice = interval;
++        }
++      else
++        {
++          slice = remaining;
++        }
+ 
+       ftpd_activity_hook("txpoll-wait");
+       ret = poll(fds, 1, slice);
+-      if (ret != 0 || timeout == 0)
++      if (ret != 0 || timeout == 0 || interval <= 0)
+         {
+           break;
+         }
+@@ -994,6 +1024,72 @@
+     }
+ 
+   return acceptsd;
++}
++
++/****************************************************************************
++ * Name: ftpd_connect
++ ****************************************************************************/
++
++static int ftpd_connect(int sd, FAR const struct sockaddr *addr,
++                        socklen_t addrlen, int timeout)
++{
++  socklen_t errlen;
++  int oldflags;
++  int errcode;
++  int ret;
++
++  if (timeout < 0)
++    {
++      ftpd_activity_hook("connect");
++      ret = connect(sd, addr, addrlen);
++      if (ret < 0)
++        {
++          return -errno;
++        }
++
++      return OK;
++    }
++
++  oldflags = fcntl(sd, F_GETFL, 0);
++  if (oldflags < 0 || fcntl(sd, F_SETFL, oldflags | O_NONBLOCK) < 0)
++    {
++      return -errno;
++    }
++
++  ftpd_activity_hook("connect");
++  ret = connect(sd, addr, addrlen);
++  if (ret < 0)
++    {
++      errcode = errno;
++      if (errcode != EINPROGRESS && errcode != EALREADY)
++        {
++          ret = -errcode;
++          goto out;
++        }
++
++      ret = ftpd_txpoll(sd, timeout);
++      if (ret < 0)
++        {
++          goto out;
++        }
++
++      errlen = sizeof(errcode);
++      if (getsockopt(sd, SOL_SOCKET, SO_ERROR, &errcode, &errlen) < 0)
++        {
++          ret = -errno;
++          goto out;
++        }
++
++      ret = errcode == 0 ? OK : -errcode;
++    }
++
++out:
++  if (fcntl(sd, F_SETFL, oldflags) < 0 && ret >= 0)
++    {
++      ret = -errno;
++    }
++
++  return ret;
+ }
+ 
+ /****************************************************************************
+@@ -1043,33 +1139,51 @@
+ static ssize_t ftpd_send(int sd, FAR const void *data, size_t size,
+                          int timeout)
+ {
++  FAR const uint8_t *buffer = data;
++  size_t total = 0;
+   ssize_t ret;
+ 
+-  /* Handle any requested timetout */
+-
+-  if (timeout >= 0)
++  while (total < size)
+     {
+-      int status = ftpd_txpoll(sd, timeout);
+-      if (status < 0)
++      /* Handle any requested timeout */
++
++      if (timeout >= 0)
+         {
+-          ninfo("ftpd_rxpoll: %d\n", status);
+-          return (ssize_t)status;
++          int status = ftpd_txpoll(sd, timeout);
++          if (status < 0)
++            {
++              ninfo("ftpd_txpoll: %d\n", status);
++              return (ssize_t)status;
++            }
+         }
+-    }
+ 
+-  /* Then send the data (waiting if necessary) */
++      /* Then send the data (waiting if necessary) */
+ 
+-  ftpd_activity_hook("send");
+-  ret = send(sd, data, size, 0);
+-  ftpd_activity_hook(ret < 0 ? "send-fail" : "send-ok");
+-  if (ret < 0)
+-    {
+-      int errval = errno;
+-      nerr("ERROR: send() failed: %d\n", errval);
+-      return -errval;
++      ftpd_activity_hook("send");
++      ret = send(sd, buffer + total, size - total, 0);
++      ftpd_activity_hook(ret < 0 ? "send-fail" : "send-ok");
++      if (ret < 0)
++        {
++          int errval = errno;
++
++          if (errval == EINTR || errval == EAGAIN ||
++              errval == EWOULDBLOCK)
++            {
++              continue;
++            }
++
++          nerr("ERROR: send() failed: %d\n", errval);
++          return -errval;
++        }
++      else if (ret == 0)
++        {
++          return -EPIPE;
++        }
++
++      total += ret;
+     }
+ 
+-  return ret;
++  return total;
+ }
+ 
+ /****************************************************************************
+@@ -1104,6 +1218,7 @@
+ 
+ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+ {
++  socklen_t addrlen;
+   int sd;
+   int ret;
+ 
+@@ -1133,20 +1248,40 @@
+           return -errval;
+         }
+ 
+-      session->data.addrlen = (socklen_t)sizeof(session->data.addr);
+-      ret = connect(session->data.sd,
+-                    (FAR const struct sockaddr *)(&session->data.addr),
+-                    session->data.addrlen);
+-      if (ret < 0)
++#ifdef CONFIG_NET_IPv4
++      if (session->data.addr.ss.ss_family == AF_INET)
+         {
+-          int errval = errno;
+-          nerr("ERROR: connect() failed: %d\n", errval);
++          addrlen = sizeof(session->data.addr.in4);
++        }
++      else
++#endif
++#ifdef CONFIG_NET_IPv6
++      if (session->data.addr.ss.ss_family == AF_INET6)
++        {
++          addrlen = sizeof(session->data.addr.in6);
++        }
++      else
++#endif
++        {
+           ftpd_response(session->cmd.sd, session->txtimeout,
+-                        g_respfmt1, 451, ' ', "Connect error !");
++                        g_respfmt1, 425, ' ',
++                        "Use PORT, EPRT, PASV, or EPSV first");
+           ftpd_dataclose(session);
+-          return -errval;
++          return -EDESTADDRREQ;
+         }
+ 
++      ret = ftpd_connect(session->data.sd,
++                         (FAR const struct sockaddr *)&session->data.addr,
++                         addrlen, session->datatimeout);
++      if (ret < 0)
++        {
++          nerr("ERROR: connect() failed: %d\n", -ret);
++          ftpd_response(session->cmd.sd, session->txtimeout,
++                        g_respfmt1, 425, ' ', "Connect error !");
++          ftpd_dataclose(session);
++          return ret;
++        }
++
+ #ifdef CONFIG_NET_SOLINGER
+         {
+           struct linger ling;
+@@ -1167,12 +1302,14 @@
+   session->data.addrlen = sizeof(session->data.addr);
+   sd = ftpd_accept(session->data.sd,
+                    (struct sockaddr *)(&session->data.addr),
+-                   &session->data.addrlen, -1);
++                   &session->data.addrlen, session->pasvtimeout);
+   if (sd < 0)
+     {
+       nerr("ERROR: ftpd_accept() failed: %d\n", sd);
+       ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 451, ' ', "Accept error !");
++                    g_respfmt1, 425, ' ',
++                    sd == -ETIMEDOUT ? "Data connection timed out" :
++                    "Accept error !");
+       ftpd_dataclose(session);
+       return sd;
+     }
+@@ -1180,6 +1317,15 @@
+   close(session->data.sd);
+   session->data.sd = sd;
+ 
++  if (!ftpd_datahost_matches(session, &session->data.addr))
++    {
++      ftpd_response(session->cmd.sd, session->txtimeout,
++                    g_respfmt1, 425, ' ',
++                    "Data peer must match control peer");
++      ftpd_dataclose(session);
++      return -EACCES;
++    }
++
+ #ifdef CONFIG_NET_SOLINGER
+     {
+       struct linger ling;
+@@ -1208,6 +1354,33 @@
+     }
+ 
+   return OK;
++}
++
++/****************************************************************************
++ * Name: ftpd_datahost_matches
++ ****************************************************************************/
++
++static bool ftpd_datahost_matches(FAR struct ftpd_session_s *session,
++                                  FAR const union ftpd_sockaddr_u *addr)
++{
++  FAR const union ftpd_sockaddr_u *peer = &session->cmd.addr;
++
++#ifdef CONFIG_NET_IPv4
++  if (peer->ss.ss_family == AF_INET && addr->ss.ss_family == AF_INET)
++    {
++      return peer->in4.sin_addr.s_addr == addr->in4.sin_addr.s_addr;
++    }
++#endif
++
++#ifdef CONFIG_NET_IPv6
++  if (peer->ss.ss_family == AF_INET6 && addr->ss.ss_family == AF_INET6)
++    {
++      return memcmp(&peer->in6.sin6_addr, &addr->in6.sin6_addr,
++                    sizeof(peer->in6.sin6_addr)) == 0;
++    }
++#endif
++
++  return false;
+ }
+ 
+ /****************************************************************************
+@@ -1807,12 +1980,12 @@
+     }
+   else
+     {
+-      while (offset < temp)
++      while (temp < offset)
+         {
+           ch = getc(outstream);
+           if (ch == EOF)
+             {
+-              ret = -errno;
++              ret = ferror(outstream) != 0 ? -EIO : -EINVAL;
+               break;
+             }
+ 
+@@ -1845,10 +2018,17 @@
+   FAR char *buffer;
+   size_t buflen;
+   size_t wantsize;
++  off_t restartpos;
+   ssize_t rdbytes;
+   ssize_t wrbytes;
+   int errval = 0;
+   int ret;
++
++  /* REST applies to one transfer attempt only, including a failed attempt. */
++
++  restartpos = session->restartpos;
++  session->restartpos = 0;
++  session->flags &= ~FTPD_SESSIONFLAG_RESTARTPOS;
+ 
+   ret = ftpd_getpath(session, session->param, &abspath, NULL);
+   if (ret < 0)
+@@ -1895,7 +2075,7 @@
+     {
+       int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
+ 
+-      if (session->restartpos <= 0)
++      if (cmdtype == 1 && restartpos <= 0)
+         {
+           oflags |= O_TRUNC;
+         }
+@@ -1926,7 +2106,7 @@
+ 
+   /* Restart position */
+ 
+-  if (session->restartpos > 0)
++  if (restartpos > 0)
+     {
+       off_t seekoffs = (off_t)-1;
+       off_t seekpos;
+@@ -1935,7 +2115,7 @@
+ 
+       if (session->type == FTPD_SESSIONTYPE_A)
+         {
+-          seekpos = ftpd_offsatoi(path, session->restartpos);
++          seekpos = ftpd_offsatoi(path, restartpos);
+           if (seekpos < 0)
+             {
+               nerr("ERROR: ftpd_offsatoi failed: %jd\n", (intmax_t)seekpos);
+@@ -1944,7 +2124,7 @@
+         }
+       else
+         {
+-          seekpos = session->restartpos;
++          seekpos = restartpos;
+           if (seekpos < 0)
+             {
+               nerr("ERROR: Bad restartpos: %jd\n", (intmax_t)seekpos);
+@@ -2019,7 +2199,7 @@
+            */
+ 
+           rdbytes = ftpd_recv(session->data.sd, session->data.buffer,
+-                              wantsize, session->rxtimeout);
++                              wantsize, session->datatimeout);
+           if (rdbytes < 0)
+             {
+               errval = -rdbytes;
+@@ -2086,7 +2266,7 @@
+           /* Write to the TCP connection */
+ 
+           wrbytes = ftpd_send(session->data.sd, buffer, buflen,
+-                              session->txtimeout);
++                              session->datatimeout);
+           if (wrbytes < 0)
+             {
+               errval = -wrbytes;
+@@ -2463,7 +2643,7 @@
+                             session->data.buflen, option);
+       if (ret == 0)
+         {
+-          ret = ftpd_response(session->data.sd, session->txtimeout,
++          ret = ftpd_response(session->data.sd, session->datatimeout,
+                               "%s", (FAR char *)session->data.buffer);
+         }
+ 
+@@ -2511,7 +2691,7 @@
+                             session->data.buflen, option);
+       if (ret >= 0)
+         {
+-          ret = ftpd_response(session->data.sd, session->txtimeout,
++          ret = ftpd_response(session->data.sd, session->datatimeout,
+                               "%s", session->data.buffer);
+         }
+ 
+@@ -2798,12 +2978,13 @@
+ static int ftpd_command_port(FAR struct ftpd_session_s *session)
+ {
+ #ifdef CONFIG_NET_IPv4
++  union ftpd_sockaddr_u requested;
+   uint8_t value[6];
++  FAR char *endptr;
+   unsigned int utemp;
+-  int temp;
++  long temp;
+   FAR char *str;
+   int index;
+-  int ret;
+ 
+   index = 0;
+   while (index < 6)
+@@ -2828,77 +3009,47 @@
+ 
+       /* Get the next value from the list */
+ 
+-      temp = atoi(str);
+-      if (temp < 0 || temp > 255)
++      temp = strtol(str, &endptr, 10);
++      if (endptr == str || *endptr != '\0' || temp < 0 || temp > 255)
+         {
+-          ret = ftpd_response(session->cmd.sd, session->txtimeout,
+-                              g_respfmt1, 501, ' ',
+-                              "Illegal PORT command");
+-          if (ret < 0)
+-            {
+-              nerr("ERROR: ftpd_response failed: %d\n", ret);
+-              return ret;
+-            }
++          return ftpd_response(session->cmd.sd, session->txtimeout,
++                               g_respfmt1, 501, ' ',
++                               "Illegal PORT command");
+         }
+ 
+       value[index++] = (uint8_t)temp;
+     }
+ 
+-  if (index < 6)
++  if (index < 6 || session->param[0] != '\0')
+     {
+       return ftpd_response(session->cmd.sd, session->txtimeout,
+                            g_respfmt1, 501, ' ', "Illegal PORT command");
+     }
+ 
+-  ftpd_dataclose(session);
++  memset(&requested, 0, sizeof(requested));
++  requested.in4.sin_family = AF_INET;
+ 
+-#if 1 /* Follow param */
+-
+-  memset(&session->data.addr, 0, sizeof(session->data.addr));
+-
+-  session->data.addr.in4.sin_family = AF_INET;
+-
+   utemp = (value[0] << 24) | (value[1] << 16) | (value[2] << 8) | (value[3]);
+-  session->data.addr.in4.sin_addr.s_addr = htonl((long)utemp);
++  requested.in4.sin_addr.s_addr = htonl(utemp);
+ 
+   utemp = (value[4] << 8) | (value[5]);
+-  session->data.addr.in4.sin_port = htons((short)utemp);
+-
+-#else /* Follow command socket address */
+-
+-  session->data.addrlen = sizeof(session->data.addr);
+-  ret = getpeername(session->cmd.sd, (struct sockaddr *)&session->data.addr,
+-                   &session->data.addrlen);
+-  if (ret >= 0)
++  if (utemp < 1024)
+     {
+-      if (session->data.addr.ss.ss_family != AF_INET)
+-        {
+-          memset(&session->data.addr, 0, sizeof(session->data.addr));
+-
+-          session->data.addr.in4.sin_family = AF_INET;
+-
+-          utemp = (value[0] << 24) | (value[1] << 16) |
+-                  (value[2] << 8) | (value[3]);
+-          session->data.addr.in4.sin_addr.s_addr = htonl(utemp);
+-        }
+-
+-      utemp = (value[4] << 8) | (value[5]);
+-      session->data.addr.in4.sin_port = htons(utemp);
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 501, ' ',
++                           "PORT requires an unprivileged data port");
+     }
+-  else
+-    {
+-      memset(&session->data.addr, 0, sizeof(session->data.addr));
+ 
+-      session->data.addr.in4.sin_family = AF_INET;
+-
+-      utemp = (value[0] << 24) | (value[1] << 16) |
+-              (value[2] << 8) | (value[3]);
+-      session->data.addr.in4.sin_addr.s_addr = htonl(utemp);
++  requested.in4.sin_port = htons(utemp);
++  if (!ftpd_datahost_matches(session, &requested))
++    {
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 501, ' ',
++                           "PORT address must match control peer");
+     }
+ 
+-  utemp = (value[4] << 8) | (value[5]);
+-  session->data.addr.in4.sin_port = htons(utemp);
+-#endif
++  ftpd_dataclose(session);
++  memcpy(&session->data.addr, &requested, sizeof(requested));
+ 
+   return ftpd_response(session->cmd.sd, session->txtimeout,
+                        g_respfmt1, 200, ' ',
+@@ -2916,134 +3067,102 @@
+ 
+ static int ftpd_command_eprt(FAR struct ftpd_session_s *session)
+ {
+-  FAR const char *str;
++  union ftpd_sockaddr_u requested;
+   FAR char *field[3];
+-  sa_family_t family;
+-  size_t left;
+-  size_t right;
+-  int count;
++  FAR char *separator;
++  FAR char *endptr;
++  FAR char *cursor;
++  char delimiter;
++  long protocol;
++  long port;
+   int index;
++  int ret;
+ 
+-  left = 0;
+-  right = strlen(session->param);
+-
+-  if (right < 1)
++  delimiter = session->param[0];
++  if (delimiter == '\0')
+     {
+-      /* no message ? */
+-
+-      ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 502, ' ',
+-                    "EPRT command not implemented !");
+-      return -EINVAL;
++      goto invalid;
+     }
+ 
+-  right--;
+-
+-  while (session->param[left] != '\0')
++  cursor = &session->param[1];
++  for (index = 0; index < 3; index++)
+     {
+-      if (session->param[left] == '|')
++      field[index] = cursor;
++      separator = strchr(cursor, delimiter);
++      if (separator == NULL)
+         {
+-          left++;
+-          break;
++          goto invalid;
+         }
+ 
+-      left++;
++      *separator = '\0';
++      cursor = separator + 1;
+     }
+ 
+-  if (right < 1 || left > right)
++  if (*cursor != '\0')
+     {
+-      /* Invalid format */
+-
+-      ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 502, ' ',
+-                    "EPRT command not implemented !");
+-      return -EINVAL;
++      goto invalid;
+     }
+ 
+-  count = 3;
+-  for (index = 0; index < count; index++)
++  protocol = strtol(field[0], &endptr, 10);
++  if (endptr == field[0] || *endptr != '\0')
+     {
+-      field[index] = NULL;
++      goto invalid;
+     }
+ 
+-  str = (FAR const char *)&session->param[left];
+-  for (index = 0; index < count && *str != '\0'; index++)
++  port = strtol(field[2], &endptr, 10);
++  if (endptr == field[2] || *endptr != '\0' ||
++      port < 1024 || port > UINT16_MAX)
+     {
+-      field[index] = ftpd_strtok_alloc(true, ",|)", &str);
+-      if (field[index] == NULL)
+-        {
+-          break;
+-        }
+-
+-      if (*str != '\0')
+-        {
+-          str++;
+-        }
++      goto invalid;
+     }
+ 
+-  if (index < count)
++  memset(&requested, 0, sizeof(requested));
++  if (protocol == 1)
+     {
+-      for (index = 0; index < count; index++)
+-        {
+-          if (field[index] != NULL)
+-            {
+-              free(field[index]);
+-            }
+-        }
+-
+-      ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 502, ' ', "EPRT command not implemented !");
+-      return -EINVAL;
++#ifdef CONFIG_NET_IPv4
++      requested.in4.sin_family = AF_INET;
++      requested.in4.sin_port = htons(port);
++      ret = inet_pton(AF_INET, field[1], &requested.in4.sin_addr);
++#else
++      ret = 0;
++#endif
+     }
+-
+-  ftpd_dataclose(session);
+-
+-  memset(&session->data.addr, 0, sizeof(session->data.addr));
+-  family = atoi(field[0]);
+-#ifndef CONFIG_NET_IPv6
+-  if (family == 1)
++  else if (protocol == 2)
+     {
+-      family = AF_INET;
+-
+-      session->data.addr.in4.sin_family = family;
+-      inet_pton(family, field[1], &session->data.addr.in4.sin_addr);
+-      session->data.addr.in4.sin_port = htons((short)atoi(field[2]));
+-    }
+-  else
+-#endif
+ #ifdef CONFIG_NET_IPv6
+-  if (family == 2)
+-    {
+-      family = AF_INET6;
+-
+-      session->data.addr.in6.sin6_family = family;
+-      inet_pton(family, field[1], &session->data.addr.in6.sin6_addr);
+-      session->data.addr.in6.sin6_port = htons((short)atoi(field[2]));
++      requested.in6.sin6_family = AF_INET6;
++      requested.in6.sin6_port = htons(port);
++      ret = inet_pton(AF_INET6, field[1], &requested.in6.sin6_addr);
++#else
++      ret = 0;
++#endif
+     }
+   else
+-#endif
+     {
+-      nerr("ERROR: Unrecognized family: %d\n", family);
+-      family = AF_UNSPEC;
++      ret = 0;
+     }
+ 
+-  for (index = 0; index < count; index++)
++  if (ret != 1)
+     {
+-      if (field[index] != NULL)
+-        {
+-          free(field[index]);
+-        }
++      goto invalid;
+     }
+ 
+-  if (family == AF_UNSPEC)
++  if (!ftpd_datahost_matches(session, &requested))
+     {
+-      ftpd_response(session->cmd.sd, session->txtimeout,
+-                    g_respfmt1, 502, ' ', "EPRT command not implemented !");
+-      return -EINVAL;
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 501, ' ',
++                           "EPRT address must match control peer");
+     }
++
++  ftpd_dataclose(session);
++  memcpy(&session->data.addr, &requested, sizeof(requested));
+ 
+   return ftpd_response(session->cmd.sd, session->txtimeout,
+                        g_respfmt1, 200, ' ', "EPRT command successful");
++
++invalid:
++  return ftpd_response(session->cmd.sd, session->txtimeout,
++                       g_respfmt1, 501, ' ', "Illegal EPRT command");
+ }
+ 
+ /****************************************************************************
+@@ -3523,7 +3642,14 @@
+     }
+ 
+   option |= ftpd_listoption((char **)(&session->param));
+-  ftpd_list(session, option);
++  ret = ftpd_list(session, option);
++  if (ret < 0)
++    {
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 550, ' ', "File list failed");
++      ftpd_dataclose(session);
++      return ret;
++    }
+ 
+   ret = ftpd_response(session->cmd.sd, session->txtimeout,
+                       g_respfmt1, 226, ' ', "Transfer complete");
+@@ -3557,7 +3683,14 @@
+     }
+ 
+   option |= ftpd_listoption((char **)(&session->param));
+-  ftpd_list(session, option);
++  ret = ftpd_list(session, option);
++  if (ret < 0)
++    {
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 550, ' ', "Name list failed");
++      ftpd_dataclose(session);
++      return ret;
++    }
+ 
+   ret = ftpd_response(session->cmd.sd, session->txtimeout,
+                       g_respfmt1, 226, ' ', "Transfer complete");
+@@ -3669,7 +3802,7 @@
+               {
+                 break;
+               }
+-            else if (ch == 'c')
++            else if (ch == '\n')
+               {
+                 offset++;
+               }
+@@ -3822,11 +3955,24 @@
+ 
+ static int ftpd_command_rest(FAR struct ftpd_session_s *session)
+ {
+-  session->restartpos = (off_t)atoll(session->param);
++  FAR char *endptr;
++  long long marker;
++
++  errno = 0;
++  marker = strtoll(session->param, &endptr, 10);
++  if (errno != 0 || endptr == session->param || *endptr != '\0' ||
++      marker < 0 || (long long)(off_t)marker != marker)
++    {
++      return ftpd_response(session->cmd.sd, session->txtimeout,
++                           g_respfmt1, 501, ' ',
++                           "Invalid restart position");
++    }
++
++  session->restartpos = (off_t)marker;
+   session->flags |= FTPD_SESSIONFLAG_RESTARTPOS;
+ 
+   return ftpd_response(session->cmd.sd, session->txtimeout,
+-                       g_respfmt1, 320, ' ', "Restart position ready");
++                       g_respfmt1, 350, ' ', "Restart position ready");
+ }
+ 
+ /****************************************************************************
+@@ -4207,8 +4353,12 @@
+ static FAR void *ftpd_worker(FAR void *arg)
+ {
+   FAR struct ftpd_session_s *session = (FAR struct ftpd_session_s *)arg;
++  size_t buffered = 0;
++  size_t consumed;
++  size_t remaining;
+   ssize_t recvbytes;
+   size_t offset;
++  size_t linebytes;
+   uint8_t ch;
+   int ret;
+ 
+@@ -4234,26 +4384,60 @@
+ 
+   for (; ; )
+     {
+-      /* Receive the next command */
++      /* Locate a complete command already buffered. */
+ 
+-      recvbytes = ftpd_recv(session->cmd.sd, session->cmd.buffer,
+-                            session->cmd.buflen - 1, session->rxtimeout);
+-
+-      /* recbytes < 0 is a receive failure (posibily a timeout);
+-       * recbytes == 0 indicates that we have lost the connection.
+-       */
+-
+-      if (recvbytes <= 0)
++      linebytes = 0;
++      for (offset = 0; offset + 1 < buffered; offset++)
+         {
+-          /* Break out of the server loop */
++          if (session->cmd.buffer[offset] == '\r' &&
++              session->cmd.buffer[offset + 1] == '\n')
++            {
++              linebytes = offset + 1;
++              break;
++            }
++        }
+ 
+-          break;
+-        }
++      if (linebytes == 0)
++        {
++          if (buffered >= session->cmd.buflen - 1)
++            {
++              ftpd_response(session->cmd.sd, session->txtimeout,
++                            g_respfmt1, 500, ' ', "Command line too long");
++              break;
++            }
+ 
+-      /* Make sure that the received string is NUL terminated */
++          recvbytes = ftpd_recv(session->cmd.sd,
++                                session->cmd.buffer + buffered,
++                                session->cmd.buflen - buffered - 1,
++                                session->rxtimeout);
+ 
+-      session->cmd.buffer[recvbytes] = '\0';
++          /* recvbytes < 0 is a receive failure (possibly a timeout);
++           * recvbytes == 0 indicates that we have lost the connection.
++           */
+ 
++          if (recvbytes <= 0)
++            {
++              if (recvbytes == -ETIMEDOUT)
++                {
++                  ftpd_response(session->cmd.sd, session->txtimeout,
++                                g_respfmt1, 421, ' ',
++                                "Control connection timed out");
++                }
++
++              break;
++            }
++
++          buffered += recvbytes;
++          session->cmd.buffer[buffered] = '\0';
++          continue;
++        }
++
++      /* NUL terminate this command while retaining any following command. */
++
++      consumed = linebytes + 1;
++      session->cmd.buffer[linebytes - 1] = '\0';
++      recvbytes = linebytes - 1;
++
+       /* TELNET protocol (RFC854)
+        *   IAC   255(FFH) interpret as command:
+        *   IP    244(F4H) interrupt process--permanently
+@@ -4280,24 +4464,13 @@
+ 
+       if (recvbytes <= 0)
+         {
+-          continue;
++          goto consume;
+         }
+ 
+       /* Make command message */
+ 
+       session->command = &session->cmd.buffer[offset];
+-      while (session->cmd.buffer[offset] != '\0')
+-        {
+-          if (session->cmd.buffer[offset] == '\r' &&
+-              session->cmd.buffer[offset + ((ssize_t)1)] == '\n')
+-            {
+-              session->cmd.buffer[offset] = '\0';
+-              break;
+-            }
+ 
+-          offset++;
+-        }
+-
+       /* Parse command and param tokens */
+ 
+       session->param   = session->command;
+@@ -4321,6 +4494,12 @@
+           nerr("ERROR: Disconnected by the command handler: %d\n", ret);
+           break;
+         }
++
++consume:
++      remaining = buffered - consumed;
++      memmove(session->cmd.buffer, session->cmd.buffer + consumed, remaining);
++      buffered = remaining;
++      session->cmd.buffer[buffered] = '\0';
+     }
+ 
+   ftpd_freesession(session);
+@@ -4478,8 +4657,10 @@
+   session->head         = server->head;
+   session->loggedin     = false;
+   session->flags        = 0;
+-  session->txtimeout    = -1;
+-  session->rxtimeout    = -1;
++  session->txtimeout    = CONFIG_FTPD_CONTROL_TIMEOUT_MS;
++  session->rxtimeout    = CONFIG_FTPD_CONTROL_TIMEOUT_MS;
++  session->datatimeout  = CONFIG_FTPD_DATA_TIMEOUT_MS;
++  session->pasvtimeout  = CONFIG_FTPD_PASV_TIMEOUT_MS;
+   session->cmd.sd       = -1;
+   session->cmd.addrlen  = sizeof(session->cmd.addr);
+   session->cmd.buflen   = CONFIG_FTPD_CMDBUFFERSIZE;
+diff --git a/examples/ftpd/Kconfig b/examples/ftpd/Kconfig
+--- a/examples/ftpd/Kconfig
++++ b/examples/ftpd/Kconfig
+@@ -19,4 +19,12 @@
+ 	int "FTP Daemon Stack Size"
+ 	default DEFAULT_TASK_STACKSIZE
+ 
++config EXAMPLES_FTPD_ROOT
++	string "FTP guest root directory"
++	default "/"
++	help
++		Expose this directory as the virtual root of the passwordless ftp
++		guest account.  Path normalization prevents .. from moving above this
++		root.  Select a dedicated writable directory for deployed images.
++
+ endif
+diff --git a/examples/ftpd/ftpd_main.c b/examples/ftpd/ftpd_main.c
+--- a/examples/ftpd/ftpd_main.c
++++ b/examples/ftpd/ftpd_main.c
+@@ -64,9 +64,7 @@
+ 
+ static const struct fptd_account_s g_ftpdaccounts[] =
+ {
+-  { FTPD_ACCOUNTFLAG_SYSTEM, "root",      "abc123", NULL },
+-  { FTPD_ACCOUNTFLAG_GUEST,  "ftp",       NULL,     NULL },
+-  { FTPD_ACCOUNTFLAG_GUEST,  "anonymous", NULL,     NULL },
++  { FTPD_ACCOUNTFLAG_GUEST, "ftp", NULL, CONFIG_EXAMPLES_FTPD_ROOT },
+ };
+ 
+ /****************************************************************************
+@@ -135,9 +133,10 @@
+  * Name: ftpd_accounts
+  ****************************************************************************/
+ 
+-static void ftpd_accounts(FTPD_SESSION handle)
++static int ftpd_accounts(FTPD_SESSION handle)
+ {
+   FAR const struct fptd_account_s *account;
++  int ret;
+   int i;
+ 
+   printf("Adding accounts:\n");
+@@ -145,15 +144,19 @@
+     {
+       account = &g_ftpdaccounts[i];
+ 
+-      printf("%d. %s account: USER=%s PASSWORD=%s HOME=%s\n", i + 1,
+-            (account->flags & FTPD_ACCOUNTFLAG_SYSTEM) ? "Root" : "User",
++      printf("%d. User account: USER=%s HOME=%s\n", i + 1,
+             (!account->user) ? "(none)" : account->user,
+-            (!account->password) ? "(none)" : account->password,
+             (!account->home) ? "(none)" : account->home);
+ 
+-      ftpd_adduser(handle, account->flags, account->user,
+-                   account->password, account->home);
++      ret = ftpd_adduser(handle, account->flags, account->user,
++                         account->password, account->home);
++      if (ret < 0)
++        {
++          return ret;
++        }
+     }
++
++  return OK;
+ }
+ 
+ static void hint(void)
+@@ -174,7 +177,7 @@
+   FTPD_SESSION handle;
+   int ret = EXIT_FAILURE;
+   int option;
+-  int family = AF_UNSPEC;
++  int family = ADDR_FAMILY;
+ 
+   /* The FTPD daemon has been started */
+ 
+@@ -196,12 +199,6 @@
+       }
+     }
+ 
+-  if (family == AF_UNSPEC)
+-    {
+-      hint();
+-      goto out;
+-    }
+-
+   if ((optind + 1) < s_argc)
+     {
+       fprintf(stderr, "%s: Too many arguments\n", s_argv[1]);
+@@ -221,7 +218,14 @@
+ 
+   /* Configure accounts */
+ 
+-  ftpd_accounts(handle);
++  ret = ftpd_accounts(handle);
++  if (ret < 0)
++    {
++      printf("FTP daemon [%d] failed to add account: %d\n",
++             g_ftpdglob.pid, ret);
++      ftpd_close(handle);
++      goto out;
++    }
+ 
+   /* Then drive the FTPD server. */
+ 
+

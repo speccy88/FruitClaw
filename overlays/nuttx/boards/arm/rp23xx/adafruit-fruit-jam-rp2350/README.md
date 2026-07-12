@@ -10,7 +10,7 @@ This board directory tracks the current Fruit Jam RP2350 NuttX bring-up work.
   pile-up fix and arrow/history sanity checks.
 - `ESP_HOSTED.md`: ESP32-C6 ESP-Hosted Wi-Fi architecture, pin mapping, and
   validated networking/service status.
-- `SDIO.md`: microSD SPI/MMC baseline and future native PIO SDIO notes.
+- `SDIO.md`: compile-time SPI compatibility and native four-bit PIO SD modes.
 - `TRMNL_DVI_TIMING.md`: 2026-07-02 HSTX/DVI display bring-up result, including
   the working native 800x480 tight 25.2 MHz timing, failed 31.5 MHz attempts,
   and the Pico SDK probe baseline that should be used for future TRMNL work.

@@ -10,13 +10,14 @@ index 883ce5e7f6..93b92e984e 100644
  
    /* Deferring process to work queue or thread */
  
-@@ -783,10 +784,26 @@ static void netdev_upper_work(FAR void *arg)
+@@ -783,10 +784,27 @@ static void netdev_upper_work(FAR void *arg)
  {
    FAR struct netdev_upperhalf_s *upper = arg;
  
 -  /* RX may release quota and driver buffer, so do RX first. */
-+  /* User-space TCP sends can enqueue data while holding the connection/device
-+   * lock and then wake this thread to perform the actual lower-half poll.
++  /* User-space TCP sends can enqueue data while holding the
++   * connection/device lock and then wake this thread to perform the actual
++   * lower-half poll.
 +   * Prioritize that explicit TX wake once so accepted TCP services do not
 +   * leave banners or HTTP replies queued behind opportunistic RX polling.
 +   */
@@ -40,7 +41,7 @@ index 883ce5e7f6..93b92e984e 100644
  }
  
  /****************************************************************************
-@@ -834,11 +851,17 @@ static int netdev_upper_loop(int argc, FAR char *argv[])
+@@ -834,11 +852,17 @@ static int netdev_upper_loop(int argc, FAR char *argv[])
   *
   ****************************************************************************/
  
@@ -59,7 +60,7 @@ index 883ce5e7f6..93b92e984e 100644
    switch (upper->lower->rxtype)
      {
        case NETDEV_RX_WORK:
-@@ -882,7 +905,17 @@ static inline void netdev_upper_queue_work(FAR struct net_driver_s *dev)
+@@ -882,7 +906,17 @@ static inline void netdev_upper_queue_work(FAR struct net_driver_s *dev)
  
  static int netdev_upper_txavail(FAR struct net_driver_s *dev)
  {
@@ -78,7 +79,7 @@ index 883ce5e7f6..93b92e984e 100644
    return OK;
  }
  
-@@ -1589,7 +1622,7 @@ void netdev_lower_rxready(FAR struct netdev_lowerhalf_s *dev)
+@@ -1589,7 +1623,7 @@ void netdev_lower_rxready(FAR struct netdev_lowerhalf_s *dev)
      }
    else
      {
@@ -87,7 +88,7 @@ index 883ce5e7f6..93b92e984e 100644
      }
  }
  
-@@ -1616,7 +1649,7 @@ void netdev_lower_txdone(FAR struct netdev_lowerhalf_s *dev)
+@@ -1616,7 +1650,7 @@ void netdev_lower_txdone(FAR struct netdev_lowerhalf_s *dev)
      }
    else
      {

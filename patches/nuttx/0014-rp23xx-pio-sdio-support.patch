@@ -1,0 +1,173 @@
+diff --git a/arch/arm/src/rp23xx/rp23xx_pio.h b/arch/arm/src/rp23xx/rp23xx_pio.h
+--- a/arch/arm/src/rp23xx/rp23xx_pio.h
++++ b/arch/arm/src/rp23xx/rp23xx_pio.h
+@@ -2013,7 +2013,7 @@ int rp23xx_pio_claim_unused_sm(uint32_t pio, bool required);
+  * Input Parameters:
+  *   pio - PIO index (0..2)
+- *   pin - GPIO pin number (0-29)
+- *   bypass - bypass set true to bypass the synchronizer.
++ *   pin - Raw system GPIO pin number
++ *   bypass - Set true to bypass the synchronizer.
+  *
+  ****************************************************************************/
+ 
+@@ -2022,10 +2022,13 @@ static inline void rp23xx_pio_set_input_sync_bypass(uint32_t pio,
+                                                     uint32_t pin,
+                                                     bool bypass)
+ {
++  uint32_t virtual_pin;
++
+   DEBUGASSERT(pin < RP23XX_GPIO_NUM);
++  virtual_pin = rp23xx_pio_gpio_to_pin(pio, pin);
+ 
+-  modbits_reg32(bypass ? (1 << pin) : 0,
+-                (1 << pin),
++  modbits_reg32(bypass ? (1u << virtual_pin) : 0,
++                (1u << virtual_pin),
+                 RP23XX_PIO_INPUT_SYNC_BYPASS(pio));
+ }
+ 
+diff --git a/boards/arm/rp23xx/common/src/Make.defs b/boards/arm/rp23xx/common/src/Make.defs
+--- a/boards/arm/rp23xx/common/src/Make.defs
++++ b/boards/arm/rp23xx/common/src/Make.defs
+@@ -34,7 +34,7 @@ ifeq ($(CONFIG_BOARDCTL_RESET),y)
+ endif
+ 
+ ifeq ($(CONFIG_SPI),y)
+-CSRCS += rp23xx_spi.c
++CSRCS += rp23xx_board_spi.c
+ endif
+ 
+ ifeq ($(CONFIG_RP23XX_I2C_DRIVER),y)
+
+diff --git a/boards/arm/rp23xx/common/src/rp23xx_spisd.c b/boards/arm/rp23xx/common/src/rp23xx_spisd.c
+--- a/boards/arm/rp23xx/common/src/rp23xx_spisd.c
++++ b/boards/arm/rp23xx/common/src/rp23xx_spisd.c
+@@ -24,7 +24,8 @@
+ 
+ #include <nuttx/config.h>
+ 
+-#ifdef CONFIG_RP23XX_SPISD_AUTOMOUNT
++#if defined(CONFIG_RP23XX_SPISD_AUTOMOUNT) || \
++    defined(CONFIG_RP23XX_SDCARD_AUTOMOUNT)
+ #  include <errno.h>
+ #  include <stdbool.h>
+ #  include <stdio.h>
+@@ -36,7 +37,8 @@
+ #include <nuttx/board.h>
+ #include <nuttx/fs/fs.h>
+ 
+-#if defined(CONFIG_RP23XX_SPISD_AUTOMOUNT) && \
++#if (defined(CONFIG_RP23XX_SPISD_AUTOMOUNT) || \
++     defined(CONFIG_RP23XX_SDCARD_AUTOMOUNT)) && \
+     (defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION))
+ #  include <nuttx/fs/partition.h>
+ #endif
+@@ -61,7 +63,8 @@
+  * Private Functions
+  ****************************************************************************/
+ 
+-#ifdef CONFIG_RP23XX_SPISD_AUTOMOUNT
++#if defined(CONFIG_RP23XX_SPISD_AUTOMOUNT) || \
++    defined(CONFIG_RP23XX_SDCARD_AUTOMOUNT)
+ #if defined(CONFIG_MBR_PARTITION) || defined(CONFIG_GPT_PARTITION)
+ static bool rp23xx_spisd_register_partitions(FAR int *parse_ret);
+ #endif
+@@ -215,6 +218,16 @@ int board_spisd_initialize(int minor, int bus)
+   int ret;
+   struct spi_dev_s *spi;
+ 
++#ifdef BOARD_SD_DETECT_PIN
++  /* Fruit Jam's normally-grounded detect contact is released when a card
++   * is inserted, so its internal pull-up produces an active-high status.
++   */
++
++  rp23xx_gpio_init(BOARD_SD_DETECT_PIN);
++  rp23xx_gpio_setdir(BOARD_SD_DETECT_PIN, false);
++  rp23xx_gpio_set_pulls(BOARD_SD_DETECT_PIN, true, false);
++#endif
++
+   /* Initialize spi device */
+ 
+   spi = rp23xx_spibus_initialize(bus);
+@@ -256,7 +269,8 @@ int board_spisd_initialize(int minor, int bus)
+ 
+   /* Mount filesystem */
+ 
+-#ifdef CONFIG_RP23XX_SPISD_AUTOMOUNT
++#if defined(CONFIG_RP23XX_SPISD_AUTOMOUNT) || \
++    defined(CONFIG_RP23XX_SDCARD_AUTOMOUNT)
+   ret = board_spisd_mount();
+   if (ret < 0)
+     {
+@@ -286,9 +300,19 @@ uint8_t board_spisd_status(struct spi_dev_s *dev, uint32_t devid)
+ 
+   if (devid == SPIDEV_MMCSD(0))
+     {
+-      /* Card detection is not supported yet */
+-
++#ifdef BOARD_SD_DETECT_PIN
++      bool present = rp23xx_gpio_get(BOARD_SD_DETECT_PIN);
++#  if defined(BOARD_SD_DETECT_ACTIVE_HIGH) && \
++      BOARD_SD_DETECT_ACTIVE_HIGH == 0
++      present = !present;
++#  endif
++      if (present)
++        {
++          ret = SPI_STATUS_PRESENT;
++        }
++#else
+       ret = SPI_STATUS_PRESENT;
++#endif
+     }
+ 
+   return ret;
+diff --git a/drivers/mmcsd/mmcsd_sdio.c b/drivers/mmcsd/mmcsd_sdio.c
+--- a/drivers/mmcsd/mmcsd_sdio.c
++++ b/drivers/mmcsd/mmcsd_sdio.c
+@@ -2777,4 +2777,5 @@ static int mmcsd_widebus(FAR struct mmcsd_state_s *priv)
+ {
++  uint32_t r1;
+   int ret;
+ 
+   /* Check if the SD card supports wide bus operation (as reported in the
+@@ -2812,13 +2813,36 @@ static int mmcsd_widebus(FAR struct mmcsd_state_s *priv)
+        * to support card detection"
+        */
+ 
+-      mmcsd_sendcmdpoll(priv, SD_ACMD42, MMCSD_ACMD42_CD_DISCONNECT);
+-      ret = mmcsd_recv_r1(priv, SD_ACMD42);
++      ret = mmcsd_sendcmdpoll(priv, SD_ACMD42,
++                              MMCSD_ACMD42_CD_DISCONNECT);
+       if (ret != OK)
+         {
+-          fwarn("WARNING: SD card does not support ACMD42: %d\n", ret);
+           return ret;
+         }
++
++      ret = SDIO_RECVR1(priv->dev, SD_ACMD42, &r1);
++      if (ret != OK)
++        {
++          return ret;
++        }
++
++      if ((r1 & MMCSD_R1_ERRORMASK) != 0)
++        {
++          if ((r1 & MMCSD_R1_ERRORMASK) == MMCSD_R1_ILLEGALCOMMAND)
++            {
++              /* ACMD42 is optional.  Continue only for the explicit
++               * unsupported-command response; transport and all other
++               * card errors remain fatal.
++               */
++
++              fwarn("WARNING: SD card does not support ACMD42\n");
++            }
++          else
++            {
++              ferr("ERROR: ACMD42 R1=%08" PRIx32 "\n", r1);
++              return -EIO;
++            }
++        }
+ 
+       /* Now send ACMD6 to select bus width operation, beginning
+        * with CMD55, APP_CMD:

@@ -41,12 +41,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: false
       - id: matrix
-        run: echo "matrix=$(scripts/check-profiles.py --list)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n ${BASE_SHA:-} && $BASE_SHA != 0000000000000000000000000000000000000000 ]] && \
+             git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            matrix=$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" | scripts/ci-profile-matrix.py --stdin)
+          else
+            matrix=$(scripts/check-profiles.py --list)
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/deps
+            build/source-cache
+          key: build-inputs-v2-${{ runner.os }}-${{ hashFiles('sources.lock.json') }}
+
+      - name: Reject shared failures before starting the build matrix
+        run: |
+          scripts/bootstrap.sh
+          scripts/check-credentials.py
+          scripts/check-patches.sh
 
   build:
-    needs: profiles
+    needs: [profiles, preflight]
     strategy:
       fail-fast: false
       matrix:
@@ -56,10 +88,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
+          submodules: false
 
-      - name: Validate source pins
-        run: scripts/bootstrap.sh --check
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/deps
+            build/source-cache
+          key: build-inputs-v2-${{ runner.os }}-${{ hashFiles('sources.lock.json') }}
 
       - name: Build ${{ matrix.profile }}
         env:
@@ -77,3 +113,39 @@ jobs:
             dist/build-records/${{ matrix.profile }}.json
           if-no-files-found: error
           retention-days: 14
+
+  sd-transports:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - fruit-jam-network
+          - fruit-jam-trmnl
+          - fruit-jam-doom
+          - fruit-jam-full
+          - fruit-jam-full-fruitclaw
+        mode: [spi, pio]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/deps
+            build/source-cache
+          key: build-inputs-v2-${{ runner.os }}-${{ hashFiles('sources.lock.json') }}
+
+      - name: Build ${{ matrix.profile }} with ${{ matrix.mode }} SD
+        env:
+          NUTTX_RP2350_VERSION: ci-${{ github.sha }}
+        run: >-
+          scripts/build-profile.sh "${{ matrix.profile }}" --container
+          --dev-sd-mode "${{ matrix.mode }}"
+
+      - name: Prove the SD-mode build leaves the checkout clean
+        run: git status --porcelain=v1 --untracked-files=all | tee /tmp/status && test ! -s /tmp/status

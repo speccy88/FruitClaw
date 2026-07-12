@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 ROOT=$(nr_root)
 PROFILE=
 DEV_BOOTSEL=0
+DEV_SD_MODE=
 USE_CONTAINER=0
 PREPARE_ONLY=0
 JOBS=${JOBS:-}
@@ -21,13 +22,15 @@ Usage: scripts/build-profile.sh <profile-id> [options]
 Options:
   --dev-bootsel   Generate a development-only image with a 10-minute
                   automatic BOOTSEL recovery backstop.
+  --dev-sd-mode M Build a Fruit Jam development image with SD transport
+                  M set to spi or pio, without changing the release profile.
   --container     Build in the digest-pinned container from sources.lock.json.
   --jobs N        Parallel make jobs (default: detected CPU count).
   --prepare-only  Materialize, patch, overlay, and configure without compiling.
   -h, --help      Show this help.
 
 Environment:
-  NUTTX_RP2350_VERSION    Artifact version; otherwise exact tag or dev-<sha>.
+  NUTTX_RP2350_VERSION    Artifact version; otherwise dev-<sha>.
   NUTTX_RP2350_WORK_ROOT Work-tree root (default: build/work).
   NUTTX_RP2350_DIST_DIR  Artifact directory (default: dist).
 EOF
@@ -36,6 +39,11 @@ EOF
 while (($#)); do
   case "$1" in
     --dev-bootsel) DEV_BOOTSEL=1 ;;
+    --dev-sd-mode)
+      (($# >= 2)) || nr_die "--dev-sd-mode requires spi or pio"
+      DEV_SD_MODE=$2
+      shift
+      ;;
     --container) USE_CONTAINER=1 ;;
     --prepare-only) PREPARE_ONLY=1 ;;
     --jobs)
@@ -55,6 +63,8 @@ done
 
 [[ -n $PROFILE ]] || { usage >&2; exit 2; }
 [[ $PROFILE =~ ^[a-z0-9][a-z0-9-]*$ ]] || nr_die "invalid profile id: $PROFILE"
+[[ -z $DEV_SD_MODE || $DEV_SD_MODE == spi || $DEV_SD_MODE == pio ]] || \
+  nr_die "--dev-sd-mode must be spi or pio"
 [[ -f $ROOT/sources.lock.json ]] || nr_die "missing sources.lock.json"
 [[ -f $ROOT/profiles/manifest.json ]] || nr_die "missing profiles/manifest.json"
 
@@ -101,8 +111,11 @@ for commit in "$NUTTX_COMMIT" "$APPS_COMMIT"; do
   [[ $commit =~ ^[0-9a-fA-F]{40}$ ]] || nr_die "source commit is not a full SHA: $commit"
 done
 
-nr_ensure_commit "$ROOT" nuttx "$NUTTX_COMMIT" "$NUTTX_URL"
-nr_ensure_commit "$ROOT" apps "$APPS_COMMIT" "$APPS_URL"
+SOURCE_CACHE_ROOT=${NUTTX_RP2350_SOURCE_CACHE:-$ROOT/build/source-cache}
+NUTTX_REPO=$SOURCE_CACHE_ROOT/nuttx.git
+APPS_REPO=$SOURCE_CACHE_ROOT/apps.git
+nr_prepare_source_cache "$NUTTX_REPO" nuttx "$NUTTX_COMMIT" "$NUTTX_URL"
+nr_prepare_source_cache "$APPS_REPO" apps "$APPS_COMMIT" "$APPS_URL"
 
 if [[ -z ${NUTTX_COMMIT_OVERRIDE:-} ]]; then
   [[ $(nr_gitlink_commit "$ROOT" nuttx) == "$NUTTX_COMMIT" ]] || \
@@ -113,7 +126,10 @@ if [[ -z ${APPS_COMMIT_OVERRIDE:-} ]]; then
     nr_die "apps lock commit does not match the recorded submodule gitlink"
 fi
 
-BEFORE_STATUS=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)
+# Source materialization archives the locked commits directly, and the
+# gitlinks were validated above.  Snapshot only wrapper state without opening
+# the large submodule repositories.
+BEFORE_STATUS=$(nr_wrapper_state "$ROOT")
 WORK=$WORK_ROOT/$PROFILE
 LOCK=$WORK_ROOT/.${PROFILE}.lock
 mkdir -p "$WORK_ROOT" "$DIST_ROOT"
@@ -131,9 +147,9 @@ trap 'exit 143' TERM
 rm -rf "$WORK"
 mkdir -p "$WORK/nuttx" "$WORK/apps"
 nr_note "materializing immutable NuttX ${NUTTX_COMMIT}"
-nr_materialize_commit "$ROOT/nuttx" "$NUTTX_COMMIT" "$WORK/nuttx"
+nr_materialize_commit "$NUTTX_REPO" "$NUTTX_COMMIT" "$WORK/nuttx"
 nr_note "materializing immutable apps ${APPS_COMMIT}"
-nr_materialize_commit "$ROOT/apps" "$APPS_COMMIT" "$WORK/apps"
+nr_materialize_commit "$APPS_REPO" "$APPS_COMMIT" "$WORK/apps"
 
 nr_apply_series NuttX "$WORK/nuttx" "$ROOT/patches/nuttx"
 nr_apply_series apps "$WORK/apps" "$ROOT/patches/apps"
@@ -241,6 +257,31 @@ if [[ $NETWORKING == cyw43439 ]]; then
     "\"${PICO_SDK_BUILD_PATH}/lib/cyw43-driver/firmware/43439A0-7.95.49.00.combined\""
 fi
 
+if [[ -n $DEV_SD_MODE ]]; then
+  [[ $BOARD == adafruit-fruit-jam-rp2350 ]] || \
+    nr_die "--dev-sd-mode is supported only for Adafruit Fruit Jam profiles"
+  nr_config_symbol_known "$WORK" ADAFRUIT_FRUIT_JAM_SD_SPI || \
+    nr_die "profile ${PROFILE} does not enable the Fruit Jam SD transport choice"
+
+  nr_note "generating non-release ${DEV_SD_MODE} SD transport override"
+  nr_config_set "$WORK/nuttx/.config" RP23XX_SDCARD_AUTOMOUNT y
+  if [[ $DEV_SD_MODE == spi ]]; then
+    nr_config_set "$WORK/nuttx/.config" ADAFRUIT_FRUIT_JAM_SD_SPI y
+    nr_config_disable "$WORK/nuttx/.config" ADAFRUIT_FRUIT_JAM_SD_PIO
+    nr_config_set "$WORK/nuttx/.config" RP23XX_SPI0 y
+    nr_config_set "$WORK/nuttx/.config" RP23XX_SPISD y
+    nr_config_disable "$WORK/nuttx/.config" RP23XX_PIO_SDIO
+  else
+    nr_config_disable "$WORK/nuttx/.config" ADAFRUIT_FRUIT_JAM_SD_SPI
+    nr_config_set "$WORK/nuttx/.config" ADAFRUIT_FRUIT_JAM_SD_PIO y
+    nr_config_disable "$WORK/nuttx/.config" RP23XX_SPI0
+    nr_config_disable "$WORK/nuttx/.config" RP23XX_SPISD
+    nr_config_disable "$WORK/nuttx/.config" RP23XX_SPISD_AUTOMOUNT
+    nr_config_set "$WORK/nuttx/.config" RP23XX_PIO_SDIO y
+    nr_config_set "$WORK/nuttx/.config" MMCSD_MULTIBLOCK_LIMIT 0
+  fi
+fi
+
 if ((DEV_BOOTSEL)); then
   nr_note "generating non-release BOOTSEL recovery override"
   DEV_SUPPORTED=0
@@ -283,9 +324,6 @@ SOURCE_DATE_EPOCH=$(nr_source_date_epoch "$ROOT")
 export SOURCE_DATE_EPOCH TZ=UTC LC_ALL=C LANG=C
 
 VERSION=${NUTTX_RP2350_VERSION:-}
-if [[ -z $VERSION ]]; then
-  VERSION=$(git -C "$ROOT" describe --exact-match --tags HEAD 2>/dev/null || true)
-fi
 if [[ -z $VERSION ]]; then
   VERSION=dev-${WRAPPER_SHA:0:12}
 fi
@@ -369,7 +407,27 @@ if ((DEV_BOOTSEL)); then
     grep -q '^CONFIG_RP23XX_PICO_BOOTSEL_ON_WATCHDOG=y$' "$WORK/nuttx/.config" || \
       nr_die "Pico 2 W development image lacks the BOOTSEL scratch-magic consumer"
   fi
-else
+fi
+
+if [[ -n $DEV_SD_MODE ]]; then
+  if [[ $DEV_SD_MODE == spi ]]; then
+    grep -q '^CONFIG_ADAFRUIT_FRUIT_JAM_SD_SPI=y$' "$WORK/nuttx/.config" || \
+      nr_die "olddefconfig rejected the Fruit Jam SPI SD override"
+    grep -q '^CONFIG_RP23XX_SPISD=y$' "$WORK/nuttx/.config" || \
+      nr_die "Fruit Jam SPI SD override did not select RP23XX_SPISD"
+    grep -q '^CONFIG_ADAFRUIT_FRUIT_JAM_SD_PIO=y$' "$WORK/nuttx/.config" && \
+      nr_die "Fruit Jam SD transports are not mutually exclusive"
+  else
+    grep -q '^CONFIG_ADAFRUIT_FRUIT_JAM_SD_PIO=y$' "$WORK/nuttx/.config" || \
+      nr_die "olddefconfig rejected the Fruit Jam PIO SD override"
+    grep -q '^CONFIG_RP23XX_PIO_SDIO=y$' "$WORK/nuttx/.config" || \
+      nr_die "Fruit Jam PIO SD override did not select RP23XX_PIO_SDIO"
+    grep -q '^CONFIG_RP23XX_SPISD=y$' "$WORK/nuttx/.config" && \
+      nr_die "Fruit Jam SD transports are not mutually exclusive"
+  fi
+fi
+
+if ((DEV_BOOTSEL == 0)) && [[ -z $DEV_SD_MODE ]]; then
   "$SCRIPT_DIR/check-profiles.py" --resolved-config "$PROFILE" "$WORK/nuttx/.config"
 fi
 
@@ -379,6 +437,7 @@ else
   [[ -f $WORK/nuttx/nuttx.uf2 ]] || nr_die "build completed without nuttx.uf2"
   SUFFIX=
   ((DEV_BOOTSEL)) && SUFFIX=-dev-bootsel
+  [[ -n $DEV_SD_MODE ]] && SUFFIX=${SUFFIX}-sd-${DEV_SD_MODE}
   ARTIFACT=$(nr_artifact_name "$VERSION" "$ARTIFACT_SLUG" "$SUFFIX")
   install -m 0644 "$WORK/nuttx/nuttx.uf2" "$DIST_ROOT/$ARTIFACT"
 
@@ -392,7 +451,7 @@ else
     "$PROFILE" "$ARTIFACT" "$DEV_BOOTSEL" "$WRAPPER_SHA" \
     "$NUTTX_COMMIT" "$APPS_COMMIT" "$CONFIG_HASH" "$PATCH_HASH" \
     "$OVERLAY_HASH" "$SOURCE_DATE_EPOCH" "$ARTIFACT_SIZE" \
-    "$ARTIFACT_HASH" <<'PY'
+    "$ARTIFACT_HASH" "$DEV_SD_MODE" <<'PY'
 import json
 import sys
 
@@ -410,6 +469,7 @@ record = {
     "source_date_epoch": int(sys.argv[11]),
     "size": int(sys.argv[12]),
     "sha256": sys.argv[13],
+    "development_sd_mode": sys.argv[14] or None,
 }
 with open(sys.argv[1], "w", encoding="utf-8") as stream:
     json.dump(record, stream, indent=2, sort_keys=True)
@@ -419,9 +479,9 @@ PY
   printf '%s  %s\n' "$ARTIFACT_HASH" "$ARTIFACT"
 fi
 
-AFTER_STATUS=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)
+AFTER_STATUS=$(nr_wrapper_state "$ROOT")
 if [[ $AFTER_STATUS != "$BEFORE_STATUS" ]]; then
   printf '%s\n' "Repository state changed during build:" >&2
   diff -u <(printf '%s\n' "$BEFORE_STATUS") <(printf '%s\n' "$AFTER_STATUS") >&2 || true
-  nr_die "build must not modify the wrapper or either submodule"
+  nr_die "build must not modify the wrapper checkout"
 fi

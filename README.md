@@ -51,6 +51,35 @@ Network profiles include DHCP, DNS, `ifconfig`, `wapi`, `renew`, ping, wget,
 NTP, netcat, telnet client/server, FTP client/server, and lightweight HTTPD.
 Wi-Fi credentials are runtime data and must never be stored in defconfigs.
 
+### Fruit Jam network services
+
+The `fruit-jam-network` profile keeps Wi-Fi credentials on the SD card and
+keeps them outside every remotely served directory.  After connecting Wi-Fi,
+start the SD-backed services from NSH:
+
+```sh
+source /mnt/sd0/wifi-up.nsh
+useradd admin YOUR_PASSWORD  # first boot only
+ftpd_start -4
+webserver &
+ifconfig
+```
+
+Telnet starts with NSH and requires an account from the SD-backed
+`/mnt/sd0/telnet.passwd`; provision it from the physical USB console, not in a
+defconfig.  HTTP serves `/mnt/sd0/www` on port 80.  FTP uses the user `ftp`
+with an empty password and confines that guest to the same `/mnt/sd0/www`
+directory; `/mnt/sd0/wifi.conf` and the Telnet password database are not
+reachable through either service.  Telnet itself is plaintext and is intended
+only for a trusted LAN.  From a host on the same LAN, run the
+repeatable service and SD transfer audit with the address printed by
+`ifconfig`:
+
+```sh
+NUTTX_TELNET_PASSWORD='YOUR_PASSWORD' \
+  ./scripts/audit-network-services.py 192.168.2.7
+```
+
 The Pico 2 W USB console baseline has been exercised on hardware.  Pico 2 W
 Wi-Fi/services and NXDoom mouse/audio remain explicit hardware-validation
 milestones; their presence in the build matrix is not a claim that those live
@@ -105,6 +134,18 @@ The override enables BOOTSEL recovery and a ten-minute BOOTSEL backstop only
 inside the ignored staging tree.  Test tooling always attempts to return the
 board to BOOTSEL before exiting and confirms that state with
 `picotool info -a`.
+
+Fruit Jam SD-enabled profiles keep the proven SPI transport as their release
+default while the four-bit PIO/DMA host is validated.  Build either transport
+from the same profile without editing its defconfig:
+
+```sh
+./scripts/build-profile.sh fruit-jam-full --dev-sd-mode spi
+./scripts/build-profile.sh fruit-jam-full --dev-sd-mode pio
+```
+
+Both images use `/dev/mmcsd0` and `/mnt/sd0`.  Cold-power-cycle the board and
+card when changing transports; a soft reset may leave a card in SPI mode.
 
 ## Releases
 

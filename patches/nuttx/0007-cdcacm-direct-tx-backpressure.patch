@@ -1,0 +1,22 @@
+diff --git a/drivers/usbdev/cdcacm.c b/drivers/usbdev/cdcacm.c
+index 13dd496e62..063c3cd947 100644
+--- a/drivers/usbdev/cdcacm.c
++++ b/drivers/usbdev/cdcacm.c
+@@ -482,6 +482,16 @@ static int cdcacm_sndpacket(FAR struct cdcacm_dev_s *priv)
+       dev->xmit.tail = 0;
+       uart_datasent(dev);
+     }
++  else
++    {
++      /* The current xmit buffer belongs to the USB request that was just
++       * submitted.  Mark the ring full until a completion callback installs
++       * another request so a following write cannot modify in-flight data.
++       */
++
++      dev->xmit.head = dev->xmit.size - 1;
++      dev->xmit.tail = 0;
++    }
+ 
+   spin_unlock_irqrestore_nopreempt(&priv->lock, flags);
+ #else
+

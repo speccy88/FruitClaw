@@ -1,0 +1,15 @@
+diff --git a/system/vi/vi.c b/system/vi/vi.c
+--- a/system/vi/vi.c
++++ b/system/vi/vi.c
+@@ -3563,7 +3563,8 @@
+ 
+           if (ch != KEY_CMDMODE_APPEND    && ch != KEY_CMDMODE_INSERT    &&
+               ch != KEY_CMDMODE_OPENBELOW && ch != KEY_CMDMODE_APPENDEND &&
+-              ch != KEY_CMDMODE_INSBEGIN  && ch != KEY_CMDMODE_OPENABOVE &&
+-              ch != KEY_CMDMODE_COLONMODE)
++              ch != KEY_CMDMODE_INSBEGIN  && ch != KEY_CMDMODE_OPENABOVE &&
++              ch != KEY_CMDMODE_COLONMODE &&
++              ch != KEY_CMDMODE_SAVEQUIT)
+             {
+               continue;
+             }

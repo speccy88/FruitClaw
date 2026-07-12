@@ -1,0 +1,504 @@
+diff --git a/drivers/net/telnet.c b/drivers/net/telnet.c
+--- a/drivers/net/telnet.c
++++ b/drivers/net/telnet.c
+@@ -27,15 +27,19 @@
+ #include <nuttx/config.h>
+ 
+ #include <assert.h>
++#include <stdint.h>
+ #include <stdio.h>
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <errno.h>
++#include <time.h>
++#include <sys/socket.h>
+ #include <nuttx/debug.h>
+ #include <nuttx/compiler.h>
+ #include <termios.h>
+ 
+ #include <nuttx/kmalloc.h>
++#include <nuttx/clock.h>
+ #include <nuttx/kthread.h>
+ #include <nuttx/signal.h>
+ #include <nuttx/mutex.h>
+@@ -63,6 +67,8 @@
+ #  define CONFIG_TELNET_MAXLCLIENTS 8
+ #endif
+ 
++#define TELNET_SEND_RETRY_DELAY_USEC 10000
++
+ #undef HAVE_SIGNALS
+ #if defined(CONFIG_TTY_SIGINT) || defined(CONFIG_TTY_SIGTSTP)
+ #  define HAVE_SIGNALS
+@@ -133,6 +139,7 @@
+   pid_t             td_pid;
+ #endif
+   tcflag_t          td_lflag;     /* Local modes */
++  mutex_t           td_txlock;    /* Serialize protocol and application TX */
+   FAR struct socket td_psock;     /* A clone of the internal socket structure */
+   char td_rxbuffer[CONFIG_TELNET_RXBUFFER_SIZE];
+   char td_txbuffer[CONFIG_TELNET_TXBUFFER_SIZE];
+@@ -157,11 +164,17 @@
+                  size_t destlen);
+ static bool    telnet_putchar(FAR struct telnet_dev_s *priv, uint8_t ch,
+                  int *nwritten);
++static int     telnet_deadline(FAR struct timespec *deadline);
+ static ssize_t telnet_sendall(FAR struct telnet_dev_s *priv,
+-                 FAR const void *buffer, size_t len);
+-static void    telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
++                 FAR const void *buffer, size_t len,
++                 FAR const struct timespec *deadline);
++static int     telnet_sendopt_locked(FAR struct telnet_dev_s *priv,
++                 uint8_t option, uint8_t value,
++                 FAR const struct timespec *deadline);
++static int     telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+                  uint8_t value);
+-static void    telnet_send_echo_state(FAR struct telnet_dev_s *priv);
++static int     telnet_send_echo_state(FAR struct telnet_dev_s *priv);
++static int     telnet_negotiate(FAR struct telnet_dev_s *priv);
+ 
+ /* Telnet character driver methods */
+ 
+@@ -654,25 +667,66 @@
+ }
+ 
+ /****************************************************************************
++ * Name: telnet_deadline
++ *
++ * Description:
++ *   Compute one absolute deadline for a complete logical Telnet write.
++ *
++ ****************************************************************************/
++
++static int telnet_deadline(FAR struct timespec *deadline)
++{
++  if (clock_gettime(CLOCK_MONOTONIC, deadline) < 0)
++    {
++      return -errno;
++    }
++
++  deadline->tv_sec += CONFIG_TELNET_SEND_TIMEOUT_MS / 1000;
++  deadline->tv_nsec +=
++    (CONFIG_TELNET_SEND_TIMEOUT_MS % 1000) * 1000000;
++  if (deadline->tv_nsec >= 1000000000)
++    {
++      deadline->tv_sec++;
++      deadline->tv_nsec -= 1000000000;
++    }
++
++  return OK;
++}
++
++/****************************************************************************
+  * Name: telnet_sendall
+  *
+  * Description:
+- *   Send a complete Telnet protocol or data buffer.  A successful stream
+- *   socket send may consume fewer bytes than requested, and signals may
+- *   interrupt a blocking send before any data is accepted.
++ *   Send a complete buffer before the absolute deadline.  The caller holds
++ *   td_txlock so Telnet negotiation cannot be interleaved with application
++ *   output.
+  *
+  ****************************************************************************/
+ 
+ static ssize_t telnet_sendall(FAR struct telnet_dev_s *priv,
+-                              FAR const void *buffer, size_t len)
++                              FAR const void *buffer, size_t len,
++                              FAR const struct timespec *deadline)
+ {
+   FAR const uint8_t *src = buffer;
++  struct timespec now;
+   size_t offset = 0;
+   ssize_t ret;
+ 
+   while (offset < len)
+     {
+-      ret = psock_send(&priv->td_psock, src + offset, len - offset, 0);
++      if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
++        {
++          return -errno;
++        }
++
++      if (clock_timespec_compare(&now, deadline) >= 0)
++        {
++          telnet_activity_hook("send-timeout");
++          return -ETIMEDOUT;
++        }
++
++      ret = psock_send(&priv->td_psock, src + offset, len - offset,
++                       MSG_DONTWAIT);
+       if (ret > 0)
+         {
+           offset += ret;
+@@ -680,6 +734,11 @@
+       else if (ret == -EINTR)
+         {
+           continue;
++        }
++      else if (ret == -EAGAIN)
++        {
++          telnet_activity_hook("send-retry");
++          nxsig_usleep(TELNET_SEND_RETRY_DELAY_USEC);
+         }
+       else
+         {
+@@ -698,8 +757,9 @@
+  *
+  ****************************************************************************/
+ 
+-static void telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+-                           uint8_t value)
++static int telnet_sendopt_locked(FAR struct telnet_dev_s *priv,
++                                 uint8_t option, uint8_t value,
++                                 FAR const struct timespec *deadline)
+ {
+   uint8_t optbuf[3];
+   ssize_t ret;
+@@ -711,19 +771,53 @@
+   telnet_dumpbuffer("Send optbuf", optbuf, 3);
+ 
+   telnet_activity_hook("sendopt");
+-  ret = telnet_sendall(priv, optbuf, sizeof(optbuf));
++  ret = telnet_sendall(priv, optbuf, sizeof(optbuf), deadline);
+   telnet_activity_hook(ret < 0 ? "sendopt-fail" : "sendopt-ok");
+   if (ret < 0)
+     {
+       nerr("ERROR: Failed to send TELNET_IAC: %zd\n", ret);
+     }
++
++  return ret < 0 ? ret : OK;
+ }
+ 
+ /****************************************************************************
++ * Name: telnet_sendopt
++ ****************************************************************************/
++
++static int telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
++                          uint8_t value)
++{
++  struct timespec deadline;
++  int ret;
++
++  ret = telnet_deadline(&deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
++  ret = nxmutex_clocklock(&priv->td_txlock, CLOCK_MONOTONIC, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
++  ret = telnet_sendopt_locked(priv, option, value, &deadline);
++  if (ret < 0)
++    {
++      psock_shutdown(&priv->td_psock, SHUT_RDWR);
++    }
++
++  nxmutex_unlock(&priv->td_txlock);
++  return ret;
++}
++
++/****************************************************************************
+  * Name: telnet_send_echo_state
+  ****************************************************************************/
+ 
+-static void telnet_send_echo_state(FAR struct telnet_dev_s *priv)
++static int telnet_send_echo_state(FAR struct telnet_dev_s *priv)
+ {
+   /* Keep the Telnet client in remote-echo mode even while an application
+    * clears termios ECHO for a password prompt.  Sending WONT ECHO here would
+@@ -731,10 +825,61 @@
+    * controls whether readline actually writes the received characters.
+    */
+ 
+-  telnet_sendopt(priv, TELNET_WILL, TELNET_ECHO);
++  return telnet_sendopt(priv, TELNET_WILL, TELNET_ECHO);
+ }
+ 
+ /****************************************************************************
++ * Name: telnet_negotiate
++ ****************************************************************************/
++
++static int telnet_negotiate(FAR struct telnet_dev_s *priv)
++{
++  struct timespec deadline;
++  int ret;
++
++  ret = telnet_deadline(&deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
++  ret = nxmutex_clocklock(&priv->td_txlock, CLOCK_MONOTONIC, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
++#ifdef CONFIG_TELNET_SUPPORT_NAWS
++  if (ret >= 0)
++    {
++      ret = telnet_sendopt_locked(priv, TELNET_DO, TELNET_NAWS, &deadline);
++    }
++#endif
++  if (ret >= 0)
++    {
++      ret = telnet_sendopt_locked(priv, TELNET_WILL, TELNET_SGA, &deadline);
++    }
++
++  if (ret >= 0)
++    {
++      ret = telnet_sendopt_locked(priv, TELNET_DO, TELNET_SGA, &deadline);
++    }
++
++  if (ret >= 0)
++    {
++      ret = telnet_sendopt_locked(priv, TELNET_WILL, TELNET_ECHO, &deadline);
++    }
++
++  if (ret < 0)
++    {
++      psock_shutdown(&priv->td_psock, SHUT_RDWR);
++    }
++
++  nxmutex_unlock(&priv->td_txlock);
++  return ret;
++}
++
++/****************************************************************************
+  * Name: telnet_open
+  ****************************************************************************/
+ 
+@@ -793,15 +938,28 @@
+   FAR char *devpath;
+   int ret;
+   int i;
++  bool destroy = false;
+ 
+   ninfo("td_crefs: %d\n", priv->td_crefs);
+ 
++  /* Serialize with writers before taking the global client lock.  Initial
++   * negotiation and all output use only td_txlock, so this ordering cannot
++   * form a g_clients_lock -> td_txlock cycle.
++   */
++
++  ret = nxmutex_lock(&priv->td_txlock);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   /* Get exclusive access to the device structures */
+ 
+   ret = nxmutex_lock(&g_clients_lock);
+   if (ret < 0)
+     {
+       nerr("ERROR: nxmutex_lock failed: %d\n", ret);
++      nxmutex_unlock(&priv->td_txlock);
+       return ret;
+     }
+ 
+@@ -861,13 +1019,28 @@
+             }
+         }
+ 
+-      /* Close the socket */
++      destroy = true;
++    }
+ 
++  nxmutex_unlock(&g_clients_lock);
++
++  if (destroy)
++    {
++      /* Socket teardown may wake network work; do not make unrelated client
++       * creation and teardown wait behind it.
++       */
++
+       psock_close(&priv->td_psock);
++    }
++
++  nxmutex_unlock(&priv->td_txlock);
++
++  if (destroy)
++    {
++      nxmutex_destroy(&priv->td_txlock);
+       kmm_free(priv);
+     }
+ 
+-  nxmutex_unlock(&g_clients_lock);
+   return ret;
+ }
+ 
+@@ -947,13 +1120,27 @@
+   FAR struct telnet_dev_s *priv = inode->i_private;
+   FAR const char *src = buffer;
+   ssize_t ret = 0;
+-  ssize_t nsent;
++  ssize_t nsent = 0;
++  size_t committed = 0;
++  struct timespec deadline;
+   int ncopied;
+   char ch;
+   bool eol;
+ 
+   ninfo("len: %zd\n", len);
+ 
++  ret = telnet_deadline(&deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
++  ret = nxmutex_clocklock(&priv->td_txlock, CLOCK_MONOTONIC, &deadline);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   /* Process each character from the user buffer */
+ 
+   for (nsent = 0, ncopied = 0; nsent < len; nsent++)
+@@ -975,7 +1162,7 @@
+           /* Yes... send the data now */
+ 
+           telnet_activity_hook("write-send");
+-          ret = telnet_sendall(priv, priv->td_txbuffer, ncopied);
++          ret = telnet_sendall(priv, priv->td_txbuffer, ncopied, &deadline);
+           telnet_activity_hook(ret < 0 ? "write-send-fail" :
+                                "write-send-ok");
+           if (ret < 0)
+@@ -986,6 +1173,7 @@
+ 
+           /* Reset the index to the beginning of the TX buffer. */
+ 
++          committed = nsent + 1;
+           ncopied = 0;
+         }
+     }
+@@ -995,7 +1183,7 @@
+   if (ncopied > 0)
+     {
+       telnet_activity_hook("write-flush");
+-      ret = telnet_sendall(priv, priv->td_txbuffer, ncopied);
++      ret = telnet_sendall(priv, priv->td_txbuffer, ncopied, &deadline);
+       telnet_activity_hook(ret < 0 ? "write-flush-fail" :
+                            "write-flush-ok");
+       if (ret < 0)
+@@ -1005,6 +1193,8 @@
+         }
+     }
+ 
++  committed = len;
++
+   /* Notice that we don't actually return the number of bytes sent, but
+    * rather, the number of bytes that the caller asked us to send.  We may
+    * have sent more bytes (because of CR-LF expansion). But it confuses
+@@ -1012,7 +1202,23 @@
+    */
+ 
+ out:
+-  return nsent ? nsent : ret;
++  if (ret < 0)
++    {
++      /* Once any part of a logical write may have reached the peer, retrying
++       * that write could duplicate output.  Tear down the failed stream so
++       * the shell exits cleanly instead of remaining connected and silent.
++       */
++
++      psock_shutdown(&priv->td_psock, SHUT_RDWR);
++    }
++
++  nxmutex_unlock(&priv->td_txlock);
++  if (ret < 0 && committed > 0)
++    {
++      return committed;
++    }
++
++  return ret < 0 ? ret : nsent;
+ }
+ 
+ /****************************************************************************
+@@ -1053,6 +1259,12 @@
+   priv->td_minor     = 0;
+   priv->td_pending   = 0;
+   priv->td_offset    = 0;
++  ret = nxmutex_init(&priv->td_txlock);
++  if (ret < 0)
++    {
++      kmm_free(priv);
++      return ret;
++    }
+ #ifdef HAVE_SIGNALS
+   priv->td_pid       = INVALID_PROCESS_ID;
+ #endif
+@@ -1133,25 +1345,23 @@
+ 
+   nx_close(session->ts_sd);
+ 
+-#ifdef CONFIG_TELNET_SUPPORT_NAWS
+-  telnet_sendopt(priv, TELNET_DO, TELNET_NAWS);
+-#endif
+-
+-  /* Make interactive shell sessions settle quickly with common desktop
+-   * telnet clients.  Waiting for the client to initiate SGA negotiation can
+-   * leave some clients in awkward local line mode where CR handling is
+-   * presented poorly.
+-   */
+-
+-  telnet_sendopt(priv, TELNET_WILL, TELNET_SGA);
+-  telnet_sendopt(priv, TELNET_DO, TELNET_SGA);
+-  telnet_send_echo_state(priv);
+-
+   /* Save ourself in the list of Telnet client threads */
+ 
+   g_telnet_clients[priv->td_minor] = priv;
+   nxmutex_unlock(&g_clients_lock);
+ 
++  /* Make interactive shell sessions settle quickly with common desktop
++   * telnet clients.  Do not hold g_clients_lock while network output waits:
++   * one slow peer must not block creation or teardown of every session.
++   */
++
++  /* A failed best-effort negotiation shuts the cloned socket down.  The
++   * session task will then observe EOF and close the registered device,
++   * which owns the remaining cleanup.
++   */
++
++  (void)telnet_negotiate(priv);
++
+   return OK;
+ 
+ errout_with_lock:
+@@ -1161,6 +1371,7 @@
+   psock_close(&priv->td_psock);
+ 
+ errout_with_dev:
++  nxmutex_destroy(&priv->td_txlock);
+   kmm_free(priv);
+   return ret;
+ }
+diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
+--- a/drivers/net/Kconfig
++++ b/drivers/net/Kconfig
+@@ -93,6 +93,16 @@
+ config TELNET_TXBUFFER_SIZE
+ 	int "Telnet TX buffer size"
+ 	default 256
++
++config TELNET_SEND_TIMEOUT_MS
++	int "Telnet send retry timeout (milliseconds)"
++	default 5000
++	range 100 60000
++	---help---
++		Maximum backpressure retry window after a non-blocking buffered TCP
++		send reports that resources are temporarily unavailable.  This keeps
++		an interactive shell from silently dropping a command response; other
++		TCP modes remain subject to their underlying socket send behavior.
+ 
+ config TELNET_MAXLCLIENTS
+ 	int "Maximum Telnet clients"

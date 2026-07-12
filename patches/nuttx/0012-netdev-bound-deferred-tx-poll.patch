@@ -1,0 +1,42 @@
+diff --git a/drivers/net/netdev_upperhalf.c b/drivers/net/netdev_upperhalf.c
+index 93b92e984e..d78125057a 100644
+--- a/drivers/net/netdev_upperhalf.c
++++ b/drivers/net/netdev_upperhalf.c
+@@ -380,15 +380,34 @@ static int netdev_upper_tx(FAR struct net_driver_s *dev)
+ static void netdev_upper_txavail_work(FAR struct netdev_upperhalf_s *upper)
+ {
+   FAR struct net_driver_s *dev = &upper->lower->netdev;
++  int budget;
+ 
+   /* Ignore the notification if the interface is not yet up */
+ 
+   netdev_lock(dev);
+-  if (IFF_IS_UP(dev->d_flags) && !upper->txing)
++  if (IFF_IS_UP(dev->d_flags) && !upper->txing &&
++      netdev_upper_can_tx(upper))
+     {
+       DEBUGASSERT(dev->d_buf == NULL); /* Make sure: IOB only. */
++
++      /* Bound deferred TX polling to the quota available at entry.  A
++       * synchronous lower half may release each packet and restore its
++       * quota before transmit() returns.  Without a separate budget, that
++       * can keep this loop running while RX work waits on the same thread.
++       * Direct mode is left unbounded because synchronous TX-done recursion
++       * is suppressed by txing and has no deferred continuation.
++       */
++
++      budget = atomic_read(&upper->lower->quota_ptr[NETPKT_TX]);
+       upper->txing = true;
+-      while (netdev_upper_can_tx(upper) &&
+-             netdev_upper_tx(dev) == NETDEV_TX_CONTINUE);
++      while (netdev_upper_can_tx(upper) &&
++             netdev_upper_tx(dev) == NETDEV_TX_CONTINUE)
++        {
++          if (upper->lower->rxtype != NETDEV_RX_DIRECT && --budget <= 0)
++            {
++              break;
++            }
++        }
++
+       upper->txing = false;
+     }

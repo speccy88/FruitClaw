@@ -38,6 +38,26 @@ NETWORK_UTILITIES_CONTRACT = {
     "fruit-jam-full-fruitclaw",
 }
 
+LOW_FOOTPRINT_NETWORK_PROFILES = {
+    "fruit-jam-network",
+    "pico-2-w-network",
+}
+
+FRUIT_JAM_SD_PROFILES = {
+    "fruit-jam-network",
+    "fruit-jam-trmnl",
+    "fruit-jam-doom",
+    "fruit-jam-full",
+    "fruit-jam-full-fruitclaw",
+}
+
+FTP_ROOT_CONTRACT = {
+    "fruit-jam-network": "/mnt/sd0/www",
+    "pico-2-w-network": "/tmp",
+    "fruit-jam-full": "/mnt/sd0/www",
+    "fruit-jam-full-fruitclaw": "/mnt/sd0/fruitclaw/scripts",
+}
+
 COMMON_REQUIRED = (
     "USBDEV",
     "CDCACM",
@@ -160,6 +180,7 @@ def check_release_policy(
         try:
             timeout_ms = int(config.get("SYSTEM_RP2350WATCHDOG_TIMEOUT_MS") or "0")
             ping_ms = int(config.get("SYSTEM_RP2350WATCHDOG_PING_MS") or "0")
+            priority = int(config.get("SYSTEM_RP2350WATCHDOG_PRIORITY") or "0")
         except ValueError:
             add_error(errors, profile, "watchdog timeout/feed values must be integers")
         else:
@@ -174,6 +195,12 @@ def check_release_policy(
                     errors,
                     profile,
                     "watchdog feed period must be positive and below its timeout",
+                )
+            if not 101 <= priority < 224:
+                add_error(
+                    errors,
+                    profile,
+                    "watchdog priority must be above applications and below driver workers",
                 )
 
 
@@ -193,6 +220,22 @@ def valid_semver_tag(tag: str) -> bool:
 def check_feature_contract(
     profile: str, config: dict[str, str | None], errors: list[str]
 ) -> None:
+    if profile in FRUIT_JAM_SD_PROFILES:
+        spi_selected = enabled(config, "ADAFRUIT_FRUIT_JAM_SD_SPI")
+        pio_selected = enabled(config, "ADAFRUIT_FRUIT_JAM_SD_PIO")
+        if spi_selected == pio_selected:
+            add_error(
+                errors,
+                profile,
+                "exactly one Fruit Jam SD transport must be selected",
+            )
+        if spi_selected and not enabled(config, "RP23XX_SPISD"):
+            add_error(errors, profile, "SPI SD choice must select CONFIG_RP23XX_SPISD=y")
+        if pio_selected and not enabled(config, "RP23XX_PIO_SDIO"):
+            add_error(errors, profile, "PIO SD choice must select CONFIG_RP23XX_PIO_SDIO=y")
+        if not enabled(config, "RP23XX_SDCARD_AUTOMOUNT"):
+            add_error(errors, profile, "SD profile requires transport-neutral automount")
+
     if profile == "fruit-jam-full-fruitclaw":
         if enabled(config, "SYSTEM_RP2350WATCHDOG"):
             add_error(
@@ -212,6 +255,225 @@ def check_feature_contract(
             if not enabled(config, symbol):
                 add_error(errors, profile, f"minimum contract requires CONFIG_{symbol}=y")
 
+    if enabled(config, "NET_TCP"):
+        try:
+            time_wait = int(config.get("NET_TCP_WAIT_TIMEOUT") or "0")
+        except ValueError:
+            add_error(errors, profile, "CONFIG_NET_TCP_WAIT_TIMEOUT must be an integer")
+        else:
+            if time_wait != 2:
+                add_error(
+                    errors,
+                    profile,
+                    "TCP profiles require CONFIG_NET_TCP_WAIT_TIMEOUT=2",
+                )
+
+    tcp_server_enabled = any(
+        enabled(config, symbol)
+        for symbol in ("NETUTILS_FTPD", "NETUTILS_TELNETD", "NETUTILS_WEBSERVER")
+    )
+    if tcp_server_enabled and not enabled(config, "NET_TCP_WRITE_BUFFERS"):
+        add_error(
+            errors,
+            profile,
+            "TCP network services require CONFIG_NET_TCP_WRITE_BUFFERS=y",
+        )
+
+    if tcp_server_enabled:
+        try:
+            rr_interval = int(config.get("RR_INTERVAL") or "0")
+        except ValueError:
+            add_error(errors, profile, "CONFIG_RR_INTERVAL must be an integer")
+        else:
+            if rr_interval <= 0:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent TCP services require round-robin scheduling",
+                )
+
+    if tcp_server_enabled and enabled(config, "NET_TCP_WRITE_BUFFERS"):
+        try:
+            write_chains = int(config.get("NET_TCP_NWRBCHAINS") or "0")
+            max_connections = int(config.get("NET_TCP_MAX_CONNS") or "0")
+            preallocated_connections = int(
+                config.get("NET_TCP_PREALLOC_CONNS") or "0"
+            )
+            poll_waiters = int(config.get("NET_TCP_NPOLLWAITERS") or "0")
+            backlog_connections = int(config.get("NET_TCPBACKLOG_CONNS") or "0")
+            preallocated_callbacks = int(
+                config.get("NET_PREALLOC_DEVIF_CALLBACKS") or "0"
+            )
+            allocated_callbacks = int(
+                config.get("NET_ALLOC_DEVIF_CALLBACKS") or "0"
+            )
+        except ValueError:
+            add_error(
+                errors,
+                profile,
+                "TCP write-chain and connection-pool limits must be integers",
+            )
+        else:
+            required_chains = min(max_connections, 32)
+            if write_chains < required_chains:
+                add_error(
+                    errors,
+                    profile,
+                    "TCP services require CONFIG_NET_TCP_NWRBCHAINS >= "
+                    f"{required_chains} for the configured connection pool",
+                )
+            if preallocated_connections < 32 or max_connections < 64:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent TCP services require at least 32 preallocated "
+                    "and 64 maximum connections",
+                )
+            if poll_waiters < 24:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent TCP services require at least 24 poll waiters",
+                )
+            if backlog_connections < 32:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent TCP services require at least 32 backlog slots",
+                )
+            if preallocated_callbacks < 32 or allocated_callbacks < 16:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent TCP services require a 32+16 device callback pool",
+                )
+
+    if enabled(config, "NETUTILS_TELNETD"):
+        if config.get("TELNET_SEND_TIMEOUT_MS") != "5000":
+            add_error(
+                errors,
+                profile,
+                "Telnet service requires CONFIG_TELNET_SEND_TIMEOUT_MS=5000",
+            )
+
+    if enabled(config, "NETUTILS_WEBSERVER"):
+        if enabled(config, "NETUTILS_HTTPD_SINGLECONNECT"):
+            add_error(
+                errors,
+                profile,
+                "HTTP single-connect mode lets one stalled peer block the service",
+            )
+
+        try:
+            http_timeout = int(config.get("NETUTILS_HTTPD_TIMEOUT") or "0")
+        except ValueError:
+            add_error(
+                errors,
+                profile,
+                "CONFIG_NETUTILS_HTTPD_TIMEOUT must be an integer",
+            )
+        else:
+            if http_timeout <= 0:
+                add_error(
+                    errors,
+                    profile,
+                    "HTTP service requires a finite receive timeout",
+                )
+
+    if enabled(config, "NETUTILS_FTPD") and enabled(config, "EXAMPLES_FTPD"):
+        try:
+            ftp_buffer_size = int(config.get("FTPD_DATABUFFERSIZE") or "0")
+        except ValueError:
+            add_error(errors, profile, "CONFIG_FTPD_DATABUFFERSIZE must be an integer")
+        else:
+            if ftp_buffer_size < 4096:
+                add_error(
+                    errors,
+                    profile,
+                    "FTP service requires at least a 4096-byte data buffer",
+                )
+
+        ftp_root = (config.get("EXAMPLES_FTPD_ROOT") or "").strip('"')
+        if ftp_root in {"", "/"}:
+            add_error(
+                errors,
+                profile,
+                "FTP service must be confined below the filesystem root",
+            )
+        else:
+            expected_ftp_root = FTP_ROOT_CONTRACT.get(profile)
+            if expected_ftp_root is not None and ftp_root != expected_ftp_root:
+                add_error(
+                    errors,
+                    profile,
+                    f"FTP guest root must be {expected_ftp_root}",
+                )
+
+    service_roots: list[str] = []
+    if enabled(config, "NETUTILS_FTPD") and enabled(config, "EXAMPLES_FTPD"):
+        service_roots.append(
+            (config.get("EXAMPLES_FTPD_ROOT") or "").strip('"')
+        )
+    if enabled(config, "NETUTILS_WEBSERVER") and (
+        enabled(config, "NETUTILS_HTTPD_MMAP")
+        or enabled(config, "NETUTILS_HTTPD_SENDFILE")
+    ):
+        service_roots.append(
+            (config.get("NETUTILS_HTTPD_PATH") or "").strip('"')
+        )
+    if any(root.startswith("/mnt/sd0/") for root in service_roots):
+        for symbol in (
+            "FS_FAT",
+            "MMCSD",
+            "RP23XX_SDCARD_AUTOMOUNT",
+        ):
+            if not enabled(config, symbol):
+                add_error(
+                    errors,
+                    profile,
+                    f"SD service root requires CONFIG_{symbol}=y",
+                )
+
+    if enabled(config, "NET_TCP_WRITE_BUFFERS"):
+        try:
+            send_buffer = int(config.get("NET_SEND_BUFSIZE") or "0")
+            max_send_buffer = int(config.get("NET_MAX_SEND_BUFSIZE") or "0")
+            receive_buffer = int(config.get("NET_RECV_BUFSIZE") or "0")
+            max_receive_buffer = int(
+                config.get("NET_MAX_RECV_BUFSIZE") or "0"
+            )
+        except ValueError:
+            add_error(
+                errors,
+                profile,
+                "TCP send and receive buffer limits must be integers",
+            )
+        else:
+            if send_buffer != 8192:
+                add_error(
+                    errors,
+                    profile,
+                    "buffered TCP profiles require an 8192-byte default send limit",
+                )
+            if max_send_buffer != 16384:
+                add_error(
+                    errors,
+                    profile,
+                    "buffered TCP profiles require a 16384-byte maximum send limit",
+                )
+            if receive_buffer != 8192:
+                add_error(
+                    errors,
+                    profile,
+                    "buffered TCP profiles require an 8192-byte receive limit",
+                )
+            if max_receive_buffer != 16384:
+                add_error(
+                    errors,
+                    profile,
+                    "buffered TCP profiles require a 16384-byte maximum receive limit",
+                )
+
     if profile in NETWORK_UTILITIES_CONTRACT:
         for symbol in NETWORK_REQUIRED:
             if not enabled(config, symbol):
@@ -220,6 +482,96 @@ def check_feature_contract(
             if "MQTT" in symbol and value == "y":
                 add_error(errors, profile, f"low-footprint network profile enables CONFIG_{symbol}")
 
+        try:
+            tcp_backlog = int(config.get("NET_TCPBACKLOG_CONNS") or "0")
+            tcp_poll_waiters = int(config.get("NET_TCP_NPOLLWAITERS") or "0")
+        except ValueError:
+            add_error(
+                errors,
+                profile,
+                "TCP backlog and poll waiter limits must be integers",
+            )
+        else:
+            if tcp_backlog < 32:
+                add_error(
+                    errors,
+                    profile,
+                    "network services require at least 32 TCP backlog slots",
+                )
+            if tcp_poll_waiters < 24:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent network services require at least 24 TCP poll waiters",
+                )
+
+        try:
+            iob_buffers = int(config.get("IOB_NBUFFERS") or "0")
+            iob_buffer_size = int(config.get("IOB_BUFSIZE") or "0")
+            iob_chains = int(config.get("IOB_NCHAINS") or "0")
+            prealloc_callbacks = int(
+                config.get("NET_PREALLOC_DEVIF_CALLBACKS") or "0"
+            )
+            alloc_callbacks = int(config.get("NET_ALLOC_DEVIF_CALLBACKS") or "0")
+        except ValueError:
+            add_error(
+                errors,
+                profile,
+                "network I/O buffer and callback limits must be integers",
+            )
+        else:
+            if iob_buffers < 512:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent network services require at least 512 I/O buffers",
+                )
+            if iob_buffer_size < 256:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent network services require 256-byte I/O buffers",
+                )
+            if iob_chains < 128:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent network services require at least 128 I/O chains",
+                )
+            if prealloc_callbacks < 32 or alloc_callbacks < 16:
+                add_error(
+                    errors,
+                    profile,
+                    "concurrent network services require a 32+16 device callback pool",
+                )
+
+    if profile in LOW_FOOTPRINT_NETWORK_PROFILES:
+        try:
+            netcat_buffer = int(config.get("NETUTILS_NETCAT_BUFSIZE") or "0")
+        except ValueError:
+            add_error(errors, profile, "CONFIG_NETUTILS_NETCAT_BUFSIZE must be an integer")
+        else:
+            if netcat_buffer < 1024:
+                add_error(errors, profile, "netcat buffer must be at least 1024 bytes")
+
+        if not enabled(config, "NET_ARP_SEND_QUEUE"):
+            add_error(errors, profile, "network profile must queue packets during ARP resolution")
+
+    if profile == "fruit-jam-network":
+        if config.get("NET_ETH_PKTSIZE") != "1514":
+            add_error(errors, profile, "ESP-Hosted profile requires a 1500-byte network MTU")
+        if not enabled(config, "NETUTILS_HTTPD_SENDFILE"):
+            add_error(errors, profile, "HTTP must serve the SD-backed document root")
+        http_root = (config.get("NETUTILS_HTTPD_PATH") or "").strip('"')
+        ftp_root = (config.get("EXAMPLES_FTPD_ROOT") or "").strip('"')
+        if http_root != "/mnt/sd0/www" or ftp_root != http_root:
+            add_error(errors, profile, "HTTP and FTP must share /mnt/sd0/www")
+        for symbol in ("FSUTILS_PASSWD", "NSH_TELNET_LOGIN", "NSH_LOGIN_PASSWD"):
+            if not enabled(config, symbol):
+                add_error(errors, profile, f"secure Telnet requires CONFIG_{symbol}=y")
+        passwd_path = (config.get("FSUTILS_PASSWD_PATH") or "").strip('"')
+        if passwd_path != "/mnt/sd0/telnet.passwd":
+            add_error(errors, profile, "Telnet password database must live on SD")
     if profile == "fruit-jam-network" and not enabled(config, "ESP_HOSTED"):
         add_error(errors, profile, "requires CONFIG_ESP_HOSTED=y")
     if profile == "pico-2-w-network" and not enabled(
@@ -261,6 +613,7 @@ def check_credentials(
     for symbol, value in config.items():
         if (
             not CREDENTIAL_RE.search(symbol)
+            or symbol.endswith(("_PATH", "_FILE", "_FILEPATH"))
             or value in (None, "", '""', "0")
             or not (value.startswith('"') and value.endswith('"'))
         ):

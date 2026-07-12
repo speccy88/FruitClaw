@@ -129,6 +129,46 @@ config RP23XX_ROMFS_MOUNT_MOUNTPOINT
 
 endif
 
+choice
+	prompt "Fruit Jam SD transport"
+	default ADAFRUIT_FRUIT_JAM_SD_SPI
+	depends on MMCSD && SCHED_HPWORK
+	---help---
+		Select the electrical transport used for the onboard microSD socket.
+		Both choices preserve /dev/mmcsd0 and /mnt/sd0, but only one may own
+		GPIO34 through GPIO39 in a firmware image.
+
+config ADAFRUIT_FRUIT_JAM_SD_SPI
+	bool "SPI compatibility mode"
+	select RP23XX_SPISD
+	select SPI_CALLBACK
+	---help---
+		Use the existing conservative SPI/MMC path.
+
+config ADAFRUIT_FRUIT_JAM_SD_PIO
+	bool "PIO four-bit SD mode"
+	select RP23XX_PIO_SDIO
+	---help---
+		Use the RP2350 PIO2 four-bit SD-memory host at up to 25 MHz.
+
+endchoice
+
+config RP23XX_PIO_SDIO
+	bool
+	select ARCH_HAVE_SDIO
+	select MMCSD_SDIO
+	select SDIO_DMA
+	select SDIO_BLOCKSETUP
+	select RP23XX_DMAC
+
+config RP23XX_SDCARD_AUTOMOUNT
+	bool "Auto-mount SD card at /mnt/sd0"
+	default y
+	depends on ADAFRUIT_FRUIT_JAM_SD_SPI || ADAFRUIT_FRUIT_JAM_SD_PIO
+	---help---
+		Mount the selected SPI or PIO SD transport during board bring-up.
+		The legacy RP23XX_SPISD_AUTOMOUNT option selects this option too.
+
 config RP23XX_WS2812_GPIO_PIN
 	default 32 if RP23XX_BOARD_HAS_WS2812
 

@@ -1,93 +1,89 @@
-# Fruit Jam SD Card Interface Notes
+# Fruit Jam SD Transports
 
-This note records the SD card decision made during the initial Adafruit Fruit
-Jam RP2350 NuttX bring-up.
+Fruit Jam can use its onboard microSD socket through either the established
+SPI/MMC driver or the RP2350 PIO-backed four-bit SD driver.  The selection is
+made at compile time; both paths retain `/dev/mmcsd0`, partition devices such
+as `/dev/mmcsd0p0`, VFAT mounting at `/mnt/sd0`, and the `sdmount` command.
 
-## Current NuttX Support
+## Wiring
 
-The board port currently uses NuttX SPI/MMC for the microSD socket. This is SD
-card access through SPI mode, not SDIO mode.
+| SD signal | GPIO | SPI signal |
+| --- | ---: | --- |
+| Card detect | 33 | Card detect |
+| CLK | 34 | SCK |
+| CMD | 35 | MOSI |
+| DAT0 | 36 | MISO |
+| DAT1 | 37 | — |
+| DAT2 | 38 | — |
+| DAT3 | 39 | CS |
 
-Current `usbnsh` status, verified on hardware:
+The Adafruit Learn pinout page currently labels card detect as GPIO34, but the
+board schematic and CircuitPython board definition confirm GPIO33.  The detect
+contact is active-high after enabling the RP2350 internal pull-up.
 
-- `/dev/mmcsd0` is created.
-- `/mnt/sd0` is mounted as `vfat`.
-- `spi bus` reports SPI bus 0 and SPI bus 1 present.
-- `i2c dev -b 0 -z 18 18` finds the onboard I2C codec at `0x18`.
+## Compile-time selection
 
-The SPI/MMC path is the stable baseline because it uses existing NuttX RP23xx
-SPI support plus the common NuttX MMC/SD SPI upper-half.
+The board Kconfig menu offers `Fruit Jam SD transport`:
 
-## Fruit Jam SD Pins
+- `CONFIG_ADAFRUIT_FRUIT_JAM_SD_SPI=y` selects the existing
+  `CONFIG_RP23XX_SPISD` compatibility path.
+- `CONFIG_ADAFRUIT_FRUIT_JAM_SD_PIO=y` selects
+  `CONFIG_RP23XX_PIO_SDIO`, NuttX `MMCSD_SDIO`, and DMA support.
 
-Fruit Jam wires the microSD socket so it can be used either in SPI mode or in
-SDIO-style mode.
+Only one transport may be selected in an image.  Release profiles initially
+select SPI.  Development builds can override the profile without editing its
+defconfig:
 
-Current SPI/MMC mapping:
-
-| Signal | GPIO | Notes |
-| ------ | ---- | ----- |
-| SCK | 34 | SPI0 clock |
-| MOSI | 35 | SPI0 TX |
-| MISO / DAT0 | 36 | SPI0 RX, also SDIO DAT0 |
-| CS / DAT3 | 39 | SPI software chip select, also SDIO DAT3 |
-| Card detect | 33 | GPIO input |
-
-Additional SDIO data pins available on the socket:
-
-| Signal | GPIO |
-| ------ | ---- |
-| DAT1 | 37 |
-| DAT2 | 38 |
-
-## SPI/MMC vs Native SDIO
-
-NuttX SPI/MMC means the SD card is accessed in SPI mode over `SCK`, `MOSI`,
-`MISO`, and `CS`. NuttX still exposes the card as an MMC/SD block device, so
-NSH and filesystems see `/dev/mmcsd0` and `/mnt/sd0` normally.
-
-Native SDIO would use SD command/data signaling instead: `CLK`, `CMD`, and
-`DAT0..DAT3`. On Fruit Jam/RP2350 this would not be a simple dedicated SDIO
-peripheral enable. It would be an SDIO protocol implementation using RP2350
-PIO, then connected to NuttX through an SDIO host lower-half.
-
-## Can Fruit Jam Do Native SDIO?
-
-Yes, the Fruit Jam hardware is suitable for it:
-
-- The microSD socket exposes the extra SDIO data pins.
-- `DAT0..DAT3` are on GPIO36, GPIO37, GPIO38, and GPIO39, which is convenient
-  for a PIO program.
-- The current NuttX RP23xx Fruit Jam port does not yet include a PIO SDIO host
-  driver.
-
-So native SDIO is possible, but it is driver work rather than a defconfig
-switch.
-
-## Future Work
-
-A future implementation should probably be added behind a separate config, for
-example:
-
-```text
-CONFIG_RP23XX_PIO_SDIO=y
+```sh
+./scripts/build-profile.sh fruit-jam-full --dev-sd-mode spi
+./scripts/build-profile.sh fruit-jam-full --dev-sd-mode pio
 ```
 
-Expected work items:
+The resulting UF2 and build-record names include `-sd-spi` or `-sd-pio`.
 
-- Add an RP23xx/RP2350 PIO SDIO host lower-half.
-- Plug that lower-half into NuttX `mmcsd_sdio`.
-- Implement SD command/response handling.
-- Support at least 1-bit mode first, then 4-bit mode.
-- Add CRC, timeout, and card error handling.
-- Decide whether to use DMA or tightly serviced PIO FIFOs for data movement.
-- Keep the existing SPI/MMC path available as the conservative fallback.
+## PIO host design
 
-Useful references:
+The native path implements NuttX `struct sdio_dev_s` with a four-bit-only
+host.  It uses:
 
-- NuttX SPI special driver docs:
-  https://nuttx.apache.org/docs/latest/components/drivers/special/spi.html
-- NuttX SDIO special driver docs:
-  https://nuttx.apache.org/docs/latest/components/drivers/special/sdio.html
-- Adafruit Fruit Jam pinout:
-  https://learn.adafruit.com/adafruit-fruit-jam/pinout
+- PIO2 with GPIOBASE 16.
+- Two state machines and 27 instructions.
+- Two dynamically allocated DMA channels.
+- 400 kHz identification and at most 25 MHz default-speed transfers.
+- CRC7 command checking and four-lane CRC16 data checking.
+- Single- and multiblock reads/writes plus bounded cancellation and timeout
+  handling.
+
+GPIO34 through GPIO39 are PIO-relative pins 18 through 23.  The driver loads
+its program before WS2812 registration; together they consume 31 of PIO2's 32
+instructions and three of its four state machines.  The driver never clears
+shared PIO instruction memory.
+
+The initial implementation intentionally does not support one-bit PIO, MMC or
+eMMC devices, arbitrary SDIO I/O functions, 50 MHz CMD6 High-Speed mode, or
+1.8 V/UHS signaling.
+
+## Card handling and switching modes
+
+GPIO33 supplies real presence status in both modes.  PIO mode uses a debounced
+both-edge interrupt and NuttX media callbacks.  Neither mode automatically
+unmounts a live filesystem; run `umount /mnt/sd0` before removing a card.
+
+The socket has no software-controlled power switch.  A card can remain latched
+in SPI mode until power is removed, so changing between SPI and PIO firmware
+requires a cold power cycle rather than only a soft reset.
+
+## Validation
+
+Use the same card for `sd_bench`, `sd_stress`, and `fstest` comparisons.  The
+PIO promotion gate is at least twice the sequential throughput of a validated
+20 MHz multiblock SPI baseline, with no CRC errors, timeouts, or hash mismatch
+while DVI, USB host, I2S, networking, and WS2812 are active.
+
+References:
+
+- https://learn.adafruit.com/adafruit-fruit-jam/pinout
+- https://learn.adafruit.com/adafruit-fruit-jam/sdio-usage
+- https://github.com/adafruit/Adafruit-Fruit-Jam-PCB
+- https://github.com/adafruit/SdFat/tree/master/src/SdCard/PioSdio
+- https://nuttx.apache.org/docs/latest/components/drivers/special/sdio.html

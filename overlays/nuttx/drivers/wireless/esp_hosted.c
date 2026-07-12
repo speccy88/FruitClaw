@@ -56,21 +56,24 @@
 #define ESP_HOSTED_RESET_RELEASE_MS      250
 #define ESP_HOSTED_HANDSHAKE_POLL_US     1000
 #define ESP_HOSTED_HANDSHAKE_POLLS       100
-#define ESP_HOSTED_RX_WORK_DRAIN_LIMIT   32
-#define ESP_HOSTED_RX_POLL_DELAY_MS      25
+#define ESP_HOSTED_RX_WORK_DRAIN_LIMIT \
+  CONFIG_ESP_HOSTED_RX_WORK_DRAIN_LIMIT
+#define ESP_HOSTED_RX_POLL_DELAY_MS \
+  CONFIG_ESP_HOSTED_RX_POLL_DELAY_MS
 /* The ESP32-C6 data-ready IRQ is not always enough on the Fruit Jam SPI
  * transport: live gateway pings showed late ICMP replies and high loss while
  * TX reported success.  Keep a low-rate background RX poll so Telnet, HTTP,
  * MCP, and Telegram replies do not wait on a missed edge.
  */
 
-#define ESP_HOSTED_RX_IDLE_POLL_DELAY_MS 100
+#define ESP_HOSTED_RX_IDLE_POLL_DELAY_MS \
+  CONFIG_ESP_HOSTED_RX_IDLE_POLL_DELAY_MS
 #define ESP_HOSTED_RX_POLL_IRQ_BUDGET    4
 #define ESP_HOSTED_RX_POLL_TX_BUDGET     4
 #define ESP_HOSTED_RX_POLL_LINK_BUDGET   8
 #define ESP_HOSTED_PUMP_DEFAULT_BUDGET   1
 #define ESP_HOSTED_PUMP_MAX_BUDGET       4
-#define ESP_HOSTED_NETDEV_PRIORITY       180
+#define ESP_HOSTED_NETDEV_PRIORITY       225
 
 #define ESP_HOSTED_HEADER_LEN            \
   (sizeof(struct esp_hosted_payload_header_s))
@@ -108,6 +111,12 @@
 #define ESP_HOSTED_IDF_TARGET_MAX        16
 #define ESP_HOSTED_NETDEV_RX_QUOTA       64
 #define ESP_HOSTED_NETDEV_TX_QUOTA       8
+
+/* Leave room for one synchronous full-duplex TX burst after RX polling
+ * reaches its high-water mark.
+ */
+
+#define ESP_HOSTED_RX_QUEUE_HIGH_WATER   16
 #define ESP_HOSTED_WIFI_PASSWORD_MAX     64
 #define ESP_HOSTED_WIFI_MODE_STA         1
 #define ESP_HOSTED_WIFI_INIT_MAGIC       0x1f2f3f4f
@@ -963,6 +972,18 @@ static void esp_hosted_wlan_clear_rx_queue(
 
   priv->stats.current_rx_queue_depth = 0;
   spin_unlock_irqrestore(&priv->rx_lock, flags);
+}
+
+static uint32_t esp_hosted_rx_queue_depth(
+  FAR struct esp_hosted_driver_s *priv)
+{
+  irqstate_t flags;
+  uint32_t depth;
+
+  flags = spin_lock_irqsave(&priv->rx_lock);
+  depth = priv->stats.current_rx_queue_depth;
+  spin_unlock_irqrestore(&priv->rx_lock, flags);
+  return depth;
 }
 
 static int esp_hosted_try_register_wlan(FAR struct esp_hosted_driver_s *priv)
@@ -3374,6 +3395,20 @@ static int esp_hosted_drain_rx(FAR struct esp_hosted_driver_s *priv,
     {
       bool had_dataready = priv->dataready_seen;
 
+#ifdef CONFIG_ESP_HOSTED_WLAN
+      /* Leave frames in the coprocessor when the NuttX network thread is
+       * temporarily blocked on the network lock.  Pulling more frames into
+       * IOB chains here only exhausts the shared pool and drops TCP data.
+       */
+
+      if (priv->wlan_registered &&
+          esp_hosted_rx_queue_depth(priv) >=
+            ESP_HOSTED_RX_QUEUE_HIGH_WATER)
+        {
+          break;
+        }
+#endif
+
       if (!had_dataready &&
           !priv->config.gpio->data_ready(priv->config.gpio_arg))
         {
@@ -3467,6 +3502,20 @@ static void esp_hosted_rx_work(FAR void *arg)
     {
       return;
     }
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  if (priv->wlan_registered &&
+      esp_hosted_rx_queue_depth(priv) >= ESP_HOSTED_RX_QUEUE_HIGH_WATER)
+    {
+      /* Recheck after a bounded delay so the higher-priority netdev thread
+       * can consume the queued packets before this producer drains more.
+       */
+
+      esp_hosted_arm_rx_poll(priv, ESP_HOSTED_RX_POLL_IRQ_BUDGET);
+      esp_hosted_schedule_rx_poll(priv);
+      return;
+    }
+#endif
 
   if (priv->config.gpio->data_ready(priv->config.gpio_arg))
     {

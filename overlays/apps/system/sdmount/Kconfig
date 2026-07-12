@@ -6,12 +6,12 @@
 ############################################################################
 
 config SYSTEM_SDMOUNT
-	tristate "SPI SD mount helper"
+	tristate "SD mount helper"
 	default n
-	depends on RP23XX_SPISD
+	depends on ADAFRUIT_FRUIT_JAM_SD_SPI || ADAFRUIT_FRUIT_JAM_SD_PIO
 	---help---
 		Enable the sdmount command.  On supported RP23xx boards it retries the
-		board SPI SD-card mount helper after boot.
+		board transport-neutral SD-card mount helper after boot.
 
 if SYSTEM_SDMOUNT
 

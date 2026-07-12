@@ -1,0 +1,25 @@
+From: NuttX RP2350 maintainers <noreply@example.com>
+Subject: [PATCH] netutils/netlib: use the configured listen backlog
+
+netlib_listenon() hard-codes a backlog of five even when NuttX is configured
+to support more pending TCP connections.  This causes avoidable connection
+resets during short HTTP bursts.  Use SOMAXCONN so the listener follows
+CONFIG_NET_TCPBACKLOG_CONNS and the platform default.
+
+---
+ netutils/netlib/netlib_listenon.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/netutils/netlib/netlib_listenon.c b/netutils/netlib/netlib_listenon.c
+index 0000000..1111111 100644
+--- a/netutils/netlib/netlib_listenon.c
++++ b/netutils/netlib/netlib_listenon.c
+@@ -114,7 +114,7 @@ int netlib_listenon(uint16_t portno)
+ 
+   /* Listen for connections on the bound TCP socket */
+ 
+-  if (listen(listensd, 5) < 0)
++  if (listen(listensd, SOMAXCONN) < 0)
+     {
+       nerr("ERROR: listen failure %d\n", errno);
+       netlib_server_activity_hook("listen-fail", portno);

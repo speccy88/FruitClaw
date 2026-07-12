@@ -1,0 +1,418 @@
+diff --git a/system/termcurses/Kconfig b/system/termcurses/Kconfig
+index 47732e160..e2fc37051 100644
+--- a/system/termcurses/Kconfig
++++ b/system/termcurses/Kconfig
+@@ -17,6 +17,15 @@ config SYSTEM_TERMCURSES_VT100
+ 	depends on SYSTEM_TERMCURSES
+ 	default y
+ 
++config SYSTEM_TERMCURSES_ESCDELAY_MS
++	int "Escape sequence timeout (milliseconds)"
++	depends on SYSTEM_TERMCURSES_VT100
++	range 1 1000
++	default 30
++	---help---
++		Maximum time to wait for bytes that follow ESC.  USB and network
++		terminals may split one cursor-key sequence across several reads.
++
+ config SYSTEM_TERMCURSES_VT100_OSX_ALT_CODES
+ 	bool "Support Mac OSX ALT keycodes in vt100 emulation."
+ 	depends on SYSTEM_TERMCURSES_VT100
+diff --git a/system/termcurses/tcurses_vt100.c b/system/termcurses/tcurses_vt100.c
+index ac4685a4e..3c071b5ee 100644
+--- a/system/termcurses/tcurses_vt100.c
++++ b/system/termcurses/tcurses_vt100.c
+@@ -57,6 +57,10 @@
+ #define KEY_HOME        0x106  /* home key */
+ #define KEY_F0          0x108  /* function keys; 64 reserved */
+ 
++#ifndef CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS
++#  define CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS 30
++#endif
++
+ #ifdef CONFIG_TERMINFO_INCLUDE_NAME
+ #define TINFO_ENTRY(n, d, c)  n, d, c
+ #else
+@@ -1162,16 +1166,6 @@ static int tcurses_vt100_getkeycode(FAR struct termcurses_s *dev,
+   priv = (FAR struct tcurses_vt100_s *)dev;
+   fd   = priv->in_fd;
+ 
+-  /* Watch stdin (fd 0) to see when it has input. */
+-
+-  FD_ZERO(&rfds);
+-  FD_SET(0, &rfds);
+-
+-  /* Wait up to 1000us for next character after ESC */
+-
+-  tv.tv_sec     = 0;
+-  tv.tv_usec    = 1000;
+-
+   /* Loop until we have a valid key code, taking escape sequences
+    * into account
+    */
+@@ -1237,7 +1231,19 @@ static int tcurses_vt100_getkeycode(FAR struct termcurses_s *dev,
+                */
+ 
+               priv->keycount = 0;
+-              ret = select(1, &rfds, NULL, NULL, &tv);
++
++              /* select() modifies both the descriptor set and timeout, so
++               * initialize them for every fragmented escape sequence.  Use
++               * the input descriptor supplied by the caller rather than
++               * assuming stdin.
++               */
++
++              FD_ZERO(&rfds);
++              FD_SET(fd, &rfds);
++              tv.tv_sec = CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS / 1000;
++              tv.tv_usec =
++                (CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS % 1000) * 1000;
++              ret = select(fd + 1, &rfds, NULL, NULL, &tv);
+               if (ret > 0)
+                 {
+                   continue;
+diff --git a/system/vi/vi.c b/system/vi/vi.c
+index e94bc4361..c1e6c194d 100644
+--- a/system/vi/vi.c
++++ b/system/vi/vi.c
+@@ -303,6 +303,7 @@ struct vi_s
+   bool drawtoeos;           /* True to draw all lines to end of screen */
+   bool redrawline;          /* True to draw current line */
+   bool updatereqcol;        /* True to update the requested column */
++  bool skip_lf_after_cr;    /* CR was normalized; suppress a following LF */
+   bool tfind;               /* Find in line 't' mode */
+   bool revfind;             /* In ? reverse find mode */
+   bool yankcharmode;        /* Indicates yank buffer is char vs. line mode */
+@@ -541,11 +542,11 @@ static void vi_write(FAR struct vi_s *vi, FAR const char *buffer,
+    * unrecoverable error is encountered)
+    */
+ 
+-  do
++  while (nremaining > 0)
+     {
+-      /* Take the next gulp */
++      /* Write only the bytes that remain. */
+ 
+-      nwritten = write(1, buffer, buflen);
++      nwritten = write(STDOUT_FILENO, buffer, nremaining);
+ 
+       /* Handle write errors.  write() should neve return 0. */
+ 
+@@ -555,8 +556,8 @@ static void vi_write(FAR struct vi_s *vi, FAR const char *buffer,
+            * received while waiting for write.
+            */
+ 
+-          int errcode = errno;
+-          if (nwritten == 0 || errcode != EINTR)
++          int errcode = nwritten == 0 ? EIO : errno;
++          if (errcode != EINTR)
+             {
+               fprintf(stderr, "ERROR: write to stdout failed: %d\n",
+                       errcode);
+@@ -571,10 +572,10 @@ static void vi_write(FAR struct vi_s *vi, FAR const char *buffer,
+ 
+       else
+         {
+-          nremaining -= nwritten;
++          buffer     += nwritten;
++          nremaining -= (size_t)nwritten;
+         }
+     }
+-  while (nremaining > 0);
+ }
+ 
+ /****************************************************************************
+@@ -602,53 +603,79 @@ static int vi_getch(FAR struct vi_s *vi)
+ {
+   char buffer;
+   ssize_t nread;
++  int ch;
+ 
+   /* Loop until we successfully read a character (or until an unexpected
+    * error occurs).
+    */
+ 
+-  if (vi->tcurs != NULL)
++  for (; ; )
+     {
+-      int specialkey;
+-      int modifiers;
++      if (vi->tcurs != NULL)
++        {
++          int specialkey;
++          int modifiers;
+ 
+-      /* Get key from termcurses */
++          /* Get key from termcurses */
+ 
+-      return termcurses_getkeycode(vi->tcurs, &specialkey, &modifiers);
+-    }
+-  else
+-    {
+-      do
++          ch = termcurses_getkeycode(vi->tcurs, &specialkey, &modifiers);
++        }
++      else
+         {
+-          /* Read one character from the incoming stream */
+-
+-          nread = read(0, &buffer, 1);
++          do
++            {
++              /* Read one character from the incoming stream */
+ 
+-          /* Check for error or end-of-file. */
++              nread = read(STDIN_FILENO, &buffer, 1);
+ 
+-          if (nread <= 0)
+-            {
+-              /* EINTR is not really an error; it simply means that a signal
+-               * we received while waiting for input.
+-               */
++              /* Check for error or end-of-file. */
+ 
+-              int errcode = errno;
+-              if (nread == 0 || errcode != EINTR)
++              if (nread <= 0)
+                 {
+-                  fprintf(stderr, "ERROR: read from stdin failed: %d\n",
+-                          errcode);
+-                  vi_release(vi);
+-                  exit(EXIT_FAILURE);
++                  /* EINTR is not really an error; it simply means that a
++                   * signal was received while waiting for input.
++                   */
++
++                  int errcode = nread == 0 ? EIO : errno;
++                  if (errcode != EINTR)
++                    {
++                      fprintf(stderr,
++                              "ERROR: read from stdin failed: %d\n",
++                              errcode);
++                      vi_release(vi);
++                      exit(EXIT_FAILURE);
++                    }
+                 }
+             }
++          while (nread < 1);
++
++          ch = (unsigned char)buffer;
++        }
++
++      /* Serial terminals variously send CR, LF, or CRLF for Enter.  Keep
++       * the rest of vi independent of that transport detail by presenting
++       * all three forms as one LF.
++       */
++
++      if (ch == '\n' && vi->skip_lf_after_cr)
++        {
++          vi->skip_lf_after_cr = false;
++          continue;
+         }
+-      while (nread < 1);
+-    }
+ 
+-  /* On success, return the character that was read */
++      if (ch == '\r')
++        {
++          vi->skip_lf_after_cr = true;
++          ch = '\n';
++        }
++      else
++        {
++          vi->skip_lf_after_cr = false;
++        }
+ 
+-  viinfo("Returning: %c[%02x]\n", isprint(buffer) ? buffer : '.', buffer);
+-  return buffer;
++      viinfo("Returning: %c[%02x]\n", isprint(ch) ? ch : '.', ch);
++      return ch;
++    }
+ }
+ 
+ /****************************************************************************
+@@ -966,7 +993,7 @@ static off_t vi_lineend(FAR struct vi_s *vi, off_t pos)
+       pos++;
+     }
+ 
+-  if (vi->text[pos] == '\n')
++  if (pos < vi->textsize && vi->text[pos] == '\n')
+     {
+       pos--;
+     }
+@@ -1276,6 +1303,7 @@ static bool vi_savetext(FAR struct vi_s *vi, FAR const char *filename,
+ {
+   FAR FILE *stream;
+   size_t nwritten;
++  int errcode;
+   int len;
+ 
+   viinfo("filename=\"%s\" pos=%ld size=%ld\n",
+@@ -1299,14 +1327,35 @@ static bool vi_savetext(FAR struct vi_s *vi, FAR const char *filename,
+     {
+       /* Report the error (or partial write).  EINTR is not handled. */
+ 
+-      vi_error(vi, g_fmtcmdfail, "fwrite", errno);
++      errcode = errno != 0 ? errno : EIO;
++      vi_error(vi, g_fmtcmdfail, "fwrite", errcode);
+       fclose(stream);
+       return false;
+     }
+ 
+-  fclose(stream);
++  /* A successful fwrite() only means that stdio accepted the bytes.  The
++   * actual filesystem error may be reported while flushing or closing.
++   */
+ 
+-  len = snprintf(vi->scratch, sizeof(vi->scratch), "%dC written", nwritten);
++  errcode = 0;
++  if (fflush(stream) != 0)
++    {
++      errcode = errno != 0 ? errno : EIO;
++      vi_error(vi, g_fmtcmdfail, "fflush", errcode);
++    }
++
++  if (fclose(stream) != 0 && errcode == 0)
++    {
++      errcode = errno != 0 ? errno : EIO;
++      vi_error(vi, g_fmtcmdfail, "fclose", errcode);
++    }
++
++  if (errcode != 0)
++    {
++      return false;
++    }
++
++  len = snprintf(vi->scratch, sizeof(vi->scratch), "%zuC written", nwritten);
+   vi_write(vi, vi->scratch, MIN(len, sizeof(vi->scratch)));
+   return true;
+ }
+@@ -1905,7 +1954,8 @@ static void vi_showtext(FAR struct vi_s *vi)
+       pos = vi_nextline(vi, pos);
+     }
+ 
+-  if (pos == vi->textsize && vi->text[pos - 1] == '\n')
++  if (vi->textsize > 0 && pos == vi->textsize &&
++      vi->text[pos - 1] == '\n')
+     {
+       vi_setcursor(vi, row, 0);
+       vi_clrtoeol(vi);
+@@ -4015,6 +4065,7 @@ static void vi_cmd_mode(FAR struct vi_s *vi)
+               {
+                 /* Emulate :wq */
+ 
++                vi->cursave = vi->cursor;
+                 strlcpy(vi->scratch, "wq", sizeof(vi->scratch));
+                 vi->cmdlen = 2;
+                 vi_parsecolon(vi);
+@@ -4462,40 +4513,37 @@ static void vi_parsecolon(FAR struct vi_s *vi)
+           strlcpy(vi->filename, filename, MAX_FILENAME);
+         }
+ 
+-      /* If it is not a new file and if there are no changes to the text
+-       * buffer, then ignore the write.
++      /* An explicit write must reach the filesystem even when the buffer is
++       * unmodified.  In particular, this creates a new named empty file.
+        */
+ 
+-      if (filename || vi->modified)
+-        {
+-          vi_clearbottomline(vi);
+-          vi_putch(vi, '"');
+-          vi_write(vi, vi->filename, strlen(vi->filename));
+-          vi_putch(vi, '"');
+-          vi_putch(vi, ' ');
+-
+-          /* Now, finally, we can save the file */
++      vi_clearbottomline(vi);
++      vi_putch(vi, '"');
++      vi_write(vi, vi->filename, strlen(vi->filename));
++      vi_putch(vi, '"');
++      vi_putch(vi, ' ');
+ 
+-          if (!vi_savetext(vi, vi->filename, 0, vi->textsize))
+-            {
+-              /* An error occurred while saving the file and we are
+-               * not forcing the quit operation.  So error out without
+-               * quitting until the user decides what to do about
+-               * the save failure.
+-               */
++      /* Now, finally, we can save the file */
+ 
+-              goto errout;
+-            }
++      if (!vi_savetext(vi, vi->filename, 0, vi->textsize))
++        {
++          /* An error occurred while saving the file and we are
++           * not forcing the quit operation.  So error out without
++           * quitting until the user decides what to do about
++           * the save failure.
++           */
+ 
+-          /* The text buffer contents are no longer modified */
++          goto errout;
++        }
+ 
+-          if (!IS_QUIT(cmd))
+-            {
+-              vi_setcursor(vi, vi->cursor.row, vi->cursor.column);
+-            }
++      /* The text buffer contents are no longer modified */
+ 
+-          vi->modified = false;
++      if (!IS_QUIT(cmd))
++        {
++          vi_setcursor(vi, vi->cursor.row, vi->cursor.column);
+         }
++
++      vi->modified = false;
+     }
+ 
+   /* Are we committed to exit-ing? */
+@@ -5624,24 +5672,38 @@ int main(int argc, FAR char *argv[])
+ 
+   if (optind < argc)
+     {
++      int pathlen;
++
+       /* Copy the file name into the file name buffer */
+ 
+       if (argv[optind][0] == '/')
+         {
+-          strlcpy(vi->filename, argv[optind], MAX_STRING);
++          pathlen = snprintf(vi->filename, sizeof(vi->filename), "%s",
++                             argv[optind]);
+         }
+       else
+         {
++          char cwd[MAX_FILENAME];
++
+           /* Make file relative to current working directory */
+ 
+-          getcwd(vi->filename, MAX_STRING);
+-          strlcat(vi->filename, "/", MAX_STRING);
+-          strlcat(vi->filename, argv[optind], MAX_STRING);
+-        }
++          if (getcwd(cwd, sizeof(cwd)) == NULL)
++            {
++              fprintf(stderr, "ERROR: getcwd failed: %d\n", errno);
++              vi_release(vi);
++              return EXIT_FAILURE;
++            }
+ 
+-      /* Make sure the (possibly truncated) file name is NUL terminated */
++          pathlen = snprintf(vi->filename, sizeof(vi->filename), "%s/%s",
++                             cwd, argv[optind]);
++        }
+ 
+-      vi->filename[MAX_STRING - 1] = '\0';
++      if (pathlen < 0 || (size_t)pathlen >= sizeof(vi->filename))
++        {
++          fprintf(stderr, "ERROR: File name is too long\n");
++          vi_release(vi);
++          return EXIT_FAILURE;
++        }
+ 
+       /* Load the file into memory */
+ 
+

@@ -15,7 +15,11 @@ config SYSTEM_RP2350WATCHDOG_PROGNAME
 
 config SYSTEM_RP2350WATCHDOG_PRIORITY
 	int "Task priority"
-	default 90
+	default 110
+	---help---
+		Keep this above normal application tasks so sustained useful work can
+		still feed the watchdog, but below high-priority driver workers so a
+		driver livelock still causes a reset.
 
 config SYSTEM_RP2350WATCHDOG_STACKSIZE
 	int "Task stack size"

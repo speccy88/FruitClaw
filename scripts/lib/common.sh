@@ -143,6 +143,27 @@ nr_gitlink_commit() {
   git -C "$root" ls-files --stage -- "$path" | awk '$1 == "160000" { print $2; exit }'
 }
 
+nr_wrapper_state() {
+  local root=$1
+
+  # Do not use `git status` here.  Refreshing a gitlink makes Git open the
+  # nested repository even with --ignore-submodules=all; on cloud-backed
+  # workspaces that metadata read can block for minutes.  Snapshot the wrapper
+  # index and ordinary tracked-file contents without entering either upstream
+  # submodule.  Do not inventory untracked paths here: on cloud-backed
+  # workspaces `git ls-files --others` can block for minutes, and it did not
+  # hash untracked contents anyway.  Build outputs are confined to explicit
+  # work and distribution directories by their callers.
+
+  git -C "$root" ls-files --stage | sed 's/^/I /'
+  paste -d ' ' \
+    <(git -C "$root" ls-files --stage | \
+      awk '$1 != "160000" {sub(/^[^\t]*\t/, ""); print}') \
+    <(git -C "$root" ls-files --stage | \
+      awk '$1 != "160000" {sub(/^[^\t]*\t/, ""); print}' | \
+      git -C "$root" hash-object --stdin-paths) | sed 's/^/W /'
+}
+
 nr_ensure_commit() {
   local root=$1
   local source=$2
@@ -164,6 +185,51 @@ nr_ensure_commit() {
 
   git -C "$repo" cat-file -e "${commit}^{commit}" 2>/dev/null || \
     nr_die "${source} commit is unavailable after fetch: ${commit}"
+}
+
+nr_prepare_source_cache() {
+  local cache=$1
+  local source=$2
+  local commit=$3
+  local url=$4
+  local fetch_from=$url
+  local local_repo
+
+  nr_require_tool git
+
+  if [[ ! -d $cache ]]; then
+    nr_note "initializing immutable ${source} source cache"
+    mkdir -p "$(dirname -- "$cache")"
+    git init --bare -q "$cache"
+  fi
+
+  [[ $(git --git-dir="$cache" rev-parse --is-bare-repository 2>/dev/null) == true ]] || \
+    nr_die "invalid ${source} source cache: ${cache}"
+
+  # The common case is an already-populated immutable cache.  Check it before
+  # opening a submodule working tree: on cloud-backed macOS workspaces merely
+  # reading nested Git metadata can block for minutes.  CI has local checked-
+  # out submodules, so only there do we use their object stores to avoid a
+  # redundant network fetch when the cache is cold.
+
+  if git --git-dir="$cache" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+    return 0
+  fi
+
+  if [[ ${CI:-} == true ]]; then
+    local_repo=$(nr_root)/$source
+    if git -C "$local_repo" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+      fetch_from=$local_repo
+    fi
+  fi
+
+  if ! git --git-dir="$cache" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+    nr_note "fetching pinned ${source} source ${commit}"
+    git --git-dir="$cache" fetch --no-tags --depth=1 "$fetch_from" "$commit"
+  fi
+
+  git --git-dir="$cache" cat-file -e "${commit}^{commit}" 2>/dev/null || \
+    nr_die "${source} commit is unavailable in source cache: ${commit}"
 }
 
 nr_materialize_commit() {

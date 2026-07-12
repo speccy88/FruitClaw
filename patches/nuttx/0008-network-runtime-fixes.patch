@@ -1,0 +1,191 @@
+diff --git a/drivers/net/telnet.c b/drivers/net/telnet.c
+index 48107fdea7c8861b79f9e91ee4b15cd27a8eee63..98fa5eefecf07ba5a22423e4318c75c46a0f8ded 100644
+--- a/drivers/net/telnet.c
++++ b/drivers/net/telnet.c
+@@ -157,6 +157,8 @@ static ssize_t telnet_receive(FAR struct telnet_dev_s *priv,
+                  size_t destlen);
+ static bool    telnet_putchar(FAR struct telnet_dev_s *priv, uint8_t ch,
+                  int *nwritten);
++static ssize_t telnet_sendall(FAR struct telnet_dev_s *priv,
++                 FAR const void *buffer, size_t len);
+ static void    telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+                  uint8_t value);
+ static void    telnet_send_echo_state(FAR struct telnet_dev_s *priv);
+@@ -414,11 +416,11 @@ static ssize_t telnet_receive(FAR struct telnet_dev_s *priv,
+               {
+                 telnet_sendopt(priv, TELNET_DO, ch);
+               }
++#endif
+ 
+             /* Reply with a DON'T */
+ 
+             else
+-#endif
+               {
+                 telnet_sendopt(priv, TELNET_DONT, ch);
+                 ninfo("Suppress: 0x%02X (%d)\n", ch, ch);
+@@ -651,6 +653,43 @@ static bool telnet_putchar(FAR struct telnet_dev_s *priv, uint8_t ch,
+   return ret;
+ }
+ 
++/****************************************************************************
++ * Name: telnet_sendall
++ *
++ * Description:
++ *   Send a complete Telnet protocol or data buffer.  A successful stream
++ *   socket send may consume fewer bytes than requested, and signals may
++ *   interrupt a blocking send before any data is accepted.
++ *
++ ****************************************************************************/
++
++static ssize_t telnet_sendall(FAR struct telnet_dev_s *priv,
++                              FAR const void *buffer, size_t len)
++{
++  FAR const uint8_t *src = buffer;
++  size_t offset = 0;
++  ssize_t ret;
++
++  while (offset < len)
++    {
++      ret = psock_send(&priv->td_psock, src + offset, len - offset, 0);
++      if (ret > 0)
++        {
++          offset += ret;
++        }
++      else if (ret == -EINTR)
++        {
++          continue;
++        }
++      else
++        {
++          return ret == 0 ? -EPIPE : ret;
++        }
++    }
++
++  return offset;
++}
++
+ /****************************************************************************
+  * Name: telnet_sendopt
+  *
+@@ -663,7 +702,7 @@ static void telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+                            uint8_t value)
+ {
+   uint8_t optbuf[3];
+-  int ret;
++  ssize_t ret;
+ 
+   optbuf[0] = TELNET_IAC;
+   optbuf[1] = option;
+@@ -672,11 +711,11 @@ static void telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+   telnet_dumpbuffer("Send optbuf", optbuf, 3);
+ 
+   telnet_activity_hook("sendopt");
+-  ret = psock_send(&priv->td_psock, optbuf, 3, 0);
++  ret = telnet_sendall(priv, optbuf, sizeof(optbuf));
+   telnet_activity_hook(ret < 0 ? "sendopt-fail" : "sendopt-ok");
+   if (ret < 0)
+     {
+-      nerr("ERROR: Failed to send TELNET_IAC: %d\n", ret);
++      nerr("ERROR: Failed to send TELNET_IAC: %zd\n", ret);
+     }
+ }
+ 
+@@ -686,21 +725,13 @@ static void telnet_sendopt(FAR struct telnet_dev_s *priv, uint8_t option,
+ 
+ static void telnet_send_echo_state(FAR struct telnet_dev_s *priv)
+ {
+-  if ((priv->td_lflag & ECHO) != 0)
+-    {
+-      /* NuttX readline echoes normal interactive input.  Tell the Telnet
+-       * client that the server will provide echo so clients do not get stuck
+-       * in local line/echo behavior that differs from serial NSH.
+-       */
+-
+-      telnet_sendopt(priv, TELNET_WILL, TELNET_ECHO);
+-    }
+-  else
+-    {
+-      /* Password prompts and other no-echo terminal modes clear ECHO. */
++  /* Keep the Telnet client in remote-echo mode even while an application
++   * clears termios ECHO for a password prompt.  Sending WONT ECHO here would
++   * invite the client to echo the password locally.  The termios flag still
++   * controls whether readline actually writes the received characters.
++   */
+ 
+-      telnet_sendopt(priv, TELNET_WONT, TELNET_ECHO);
+-    }
++  telnet_sendopt(priv, TELNET_WILL, TELNET_ECHO);
+ }
+ 
+ /****************************************************************************
+@@ -944,13 +975,12 @@ static ssize_t telnet_write(FAR struct file *filep, FAR const char *buffer,
+           /* Yes... send the data now */
+ 
+           telnet_activity_hook("write-send");
+-          ret = psock_send(&priv->td_psock, priv->td_txbuffer, ncopied, 0);
++          ret = telnet_sendall(priv, priv->td_txbuffer, ncopied);
+           telnet_activity_hook(ret < 0 ? "write-send-fail" :
+                                "write-send-ok");
+           if (ret < 0)
+             {
+-              nerr("ERROR: psock_send failed '%s': %zd\n",
+-                   priv->td_txbuffer, ret);
++              nerr("ERROR: psock_send failed: %zd\n", ret);
+               goto out;
+             }
+ 
+@@ -965,13 +995,12 @@ static ssize_t telnet_write(FAR struct file *filep, FAR const char *buffer,
+   if (ncopied > 0)
+     {
+       telnet_activity_hook("write-flush");
+-      ret = psock_send(&priv->td_psock, priv->td_txbuffer, ncopied, 0);
++      ret = telnet_sendall(priv, priv->td_txbuffer, ncopied);
+       telnet_activity_hook(ret < 0 ? "write-flush-fail" :
+                            "write-flush-ok");
+       if (ret < 0)
+         {
+-          nerr("ERROR: psock_send failed '%s': %zd\n",
+-               priv->td_txbuffer, ret);
++          nerr("ERROR: psock_send failed: %zd\n", ret);
+           goto out;
+         }
+     }
+diff --git a/drivers/wireless/Kconfig b/drivers/wireless/Kconfig
+index 15f51deb35f5e58bd5430ae000d3a0a5224ba5c3..88397ec2ec35256d41c694ab7a8ce5f4553f2322 100644
+--- a/drivers/wireless/Kconfig
++++ b/drivers/wireless/Kconfig
+@@ -178,6 +178,33 @@ config ESP_HOSTED_SPI_MODE
+ 		SPI mode used for ESP-Hosted full-duplex transport.  ESP-Hosted
+ 		slave firmware does not support mode 0.
+ 
++config ESP_HOSTED_RX_WORK_DRAIN_LIMIT
++	int "Maximum frames drained per ESP-Hosted worker pass"
++	default 32
++	range 1 64
++	depends on ESP_HOSTED_SPI
++	---help---
++		Maximum number of receive frames processed by one worker pass.
++		Lower values reduce work-queue occupancy and peak IOB pressure;
++		higher values can improve receive throughput when buffers permit.
++
++config ESP_HOSTED_RX_POLL_DELAY_MS
++	int "ESP-Hosted active receive poll delay (ms)"
++	default 25
++	range 1 1000
++	depends on ESP_HOSTED_SPI
++	---help---
++		Delay between receive polls while recent traffic indicates a burst.
++
++config ESP_HOSTED_RX_IDLE_POLL_DELAY_MS
++	int "ESP-Hosted idle receive poll delay (ms)"
++	default 100
++	range 1 10000
++	depends on ESP_HOSTED_SPI
++	---help---
++		Background receive poll delay when no burst traffic is detected.
++		Periodic polling recovers from missed data-ready GPIO edges.
++
+ endif # ESP_HOSTED
+ 
+ source "drivers/wireless/spirit/Kconfig"

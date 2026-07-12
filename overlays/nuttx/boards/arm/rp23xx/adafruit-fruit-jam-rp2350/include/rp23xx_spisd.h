@@ -70,7 +70,7 @@ int board_spisd_initialize(int minor, int bus);
  *
  ****************************************************************************/
 
-#if defined(CONFIG_RP23XX_SPISD) && defined(CONFIG_RP23XX_SPISD_AUTOMOUNT)
+#if defined(CONFIG_RP23XX_SPISD) && defined(CONFIG_RP23XX_SDCARD_AUTOMOUNT)
 int board_spisd_mount(void);
 #endif
 

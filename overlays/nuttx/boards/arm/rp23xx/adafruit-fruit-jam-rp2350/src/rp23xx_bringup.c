@@ -58,6 +58,11 @@
 #include "rp23xx_common_bringup.h"
 #endif /* CONFIG_ARCH_BOARD_COMMON */
 
+#if defined(CONFIG_ADAFRUIT_FRUIT_JAM_SD_PIO) || \
+    defined(CONFIG_ADAFRUIT_FRUIT_JAM_SD_SPI)
+#  include <arch/board/rp23xx_sdcard.h>
+#endif
+
 #ifdef CONFIG_USERLED
 #  include <nuttx/leds/userled.h>
 #endif
@@ -340,6 +345,18 @@ int rp23xx_bringup(uintptr_t arg)
       return OK;
     }
 
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_SD_PIO
+  /* Claim PIO2 instruction memory before the WS2812 device is registered by
+   * common bring-up.  The two programs intentionally share GPIOBASE=16.
+   */
+
+  ret = board_piosd_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: PIO SD initialize failed: %d\n", ret);
+    }
+#endif
+
 #ifdef CONFIG_ARCH_BOARD_COMMON
 
   ret = rp23xx_common_bringup();
@@ -349,6 +366,15 @@ int rp23xx_bringup(uintptr_t arg)
     }
 
 #endif /* CONFIG_ARCH_BOARD_COMMON */
+
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_SD_SPI
+  ret = board_sdcard_carddetect_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_WARNING,
+             "WARNING: SPI SD card-detect IRQ unavailable: %d\n", ret);
+    }
+#endif
 
   /* --- Place any board specific bringup code here --- */
 

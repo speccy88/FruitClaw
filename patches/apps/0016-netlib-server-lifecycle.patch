@@ -1,0 +1,53 @@
+diff --git a/netutils/netlib/netlib_server.c b/netutils/netlib/netlib_server.c
+--- a/netutils/netlib/netlib_server.c
++++ b/netutils/netlib/netlib_server.c
+@@ -98,7 +98,17 @@ void netlib_server(uint16_t portno,
+                          SOCK_CLOEXEC);
+       if (acceptsd < 0)
+         {
+-          nerr("ERROR: accept failure: %d\n", errno);
++          int errcode = errno;
++
++          if (errcode == EINTR || errcode == EAGAIN ||
++              errcode == EWOULDBLOCK)
++            {
++              netlib_server_activity_hook("accept-retry", portno);
++              continue;
++            }
++
++          nerr("ERROR: accept failure: %d\n", errcode);
++          netlib_server_activity_hook("accept-fail", portno);
+           break;
+         }
+ 
+@@ -118,7 +128,7 @@ void netlib_server(uint16_t portno,
+         {
+           close(acceptsd);
+           nerr("ERROR: setsockopt SO_LINGER failure: %d\n", errno);
+-          break;
++          continue;
+         }
+ #endif
+ 
+@@ -139,19 +149,9 @@ void netlib_server(uint16_t portno,
+           close(acceptsd);
+           nerr("ERROR: pthread_create failed\n");
+ 
+-          if (ret == EAGAIN)
+-            {
+-              /* Lacked resources to create a new thread. This is a temporary
+-               * condition, so we close this peer, but keep serving for
+-               * other connections.
+-               */
+-
+-              continue;
+-            }
+-
+-          /* Something is very wrong... Break out and stop serving */
++          /* A failed peer must not take down the shared listener. */
+ 
+-          break;
++          continue;
+         }
+ 
+       /* We don't care when/how the child thread exits so detach from it now

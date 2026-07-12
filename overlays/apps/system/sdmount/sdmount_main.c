@@ -18,7 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <arch/board/rp23xx_spisd.h>
+#include <arch/board/rp23xx_sdcard.h>
 
 #ifndef CONFIG_SYSTEM_SDMOUNT_DEVPATH
 #  define CONFIG_SYSTEM_SDMOUNT_DEVPATH "/dev/mmcsd0"
@@ -140,7 +140,8 @@ static int sdmount_healthcheck(void)
 
 int main(int argc, FAR char *argv[])
 {
-#ifdef CONFIG_RP23XX_SPISD
+#if defined(CONFIG_ADAFRUIT_FRUIT_JAM_SD_SPI) || \
+    defined(CONFIG_ADAFRUIT_FRUIT_JAM_SD_PIO)
   pthread_t timeout_thread;
   int ret;
 
@@ -156,7 +157,7 @@ int main(int argc, FAR char *argv[])
          CONFIG_SYSTEM_SDMOUNT_MOUNTPOINT);
   fflush(stdout);
 
-  ret = board_spisd_mount();
+  ret = board_sdcard_mount();
 
   if (ret < 0)
     {
@@ -181,7 +182,7 @@ int main(int argc, FAR char *argv[])
          CONFIG_SYSTEM_SDMOUNT_MOUNTPOINT);
   return 0;
 #else
-  printf("sdmount: RP23xx SPI SD support is disabled\n");
+  printf("sdmount: Fruit Jam SD support is disabled\n");
   return 1;
 #endif
 }

@@ -1,0 +1,28 @@
+diff --git a/drivers/net/telnet.c b/drivers/net/telnet.c
+--- a/drivers/net/telnet.c
++++ b/drivers/net/telnet.c
+@@ -127,7 +127,7 @@ struct telnet_dev_s
+   uint8_t           td_crefs;     /* The number of open references to the session */
+   uint8_t           td_minor;     /* Minor device number */
+   bool              td_sb_iac;    /* Saw IAC within sub-negotiation payload */
+-  bool              td_skip_cr_suffix; /* Skip LF/NUL after Telnet CR */
++  bool              td_skip_cr_suffix;
+   uint16_t          td_offset;    /* Offset to the valid, pending bytes in the rxbuffer */
+   uint16_t          td_pending;   /* Number of valid, pending bytes in the rxbuffer */
+ #ifdef CONFIG_TELNET_SUPPORT_NAWS
+@@ -854,6 +854,7 @@ static int telnet_negotiate(FAR struct telnet_dev_s *priv)
+     {
+       ret = telnet_sendopt_locked(priv, TELNET_DO, TELNET_NAWS, &deadline);
+     }
++
+ #endif
+   if (ret >= 0)
+     {
+@@ -1265,6 +1266,7 @@ static int telnet_session(FAR struct telnet_session_s *session)
+       kmm_free(priv);
+       return ret;
+     }
++
+ #ifdef HAVE_SIGNALS
+   priv->td_pid       = INVALID_PROCESS_ID;
+ #endif

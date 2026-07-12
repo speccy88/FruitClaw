@@ -1,0 +1,980 @@
+diff --git a/include/netutils/httpd.h b/include/netutils/httpd.h
+--- a/include/netutils/httpd.h
++++ b/include/netutils/httpd.h
+@@ -102,6 +102,7 @@
+ enum httpd_method_e
+ {
+   HTTPD_METHOD_GET = 0,
++  HTTPD_METHOD_HEAD,
+   HTTPD_METHOD_POST,
+   HTTPD_METHOD_DELETE,
+   HTTPD_METHOD_OPTIONS,
+@@ -323,7 +324,8 @@
+ 
+ #ifdef CONFIG_NETUTILS_HTTPD_DIRLIST
+ bool httpd_is_file(FAR const char *filename);
+-ssize_t httpd_dirlist(int outfd, FAR struct httpd_fs_file *file);
++ssize_t httpd_dirlist(int outfd, FAR struct httpd_fs_file *file,
++                      bool chunked);
+ #endif
+ 
+ #undef EXTERN
+diff --git a/netutils/webserver/httpd.h b/netutils/webserver/httpd.h
+--- a/netutils/webserver/httpd.h
++++ b/netutils/webserver/httpd.h
+@@ -44,6 +44,7 @@
+ 
+ #include <nuttx/config.h>
+ #include <stdint.h>
++#include <stdbool.h>
+ #include <nuttx/net/netconfig.h>
+ 
+ /****************************************************************************
+@@ -62,7 +63,8 @@
+ 
+ int httpd_sendfile_open(const char *name, struct httpd_fs_file *file);
+ int httpd_sendfile_close(struct httpd_fs_file *file);
+-int httpd_sendfile_send(int outfd, struct httpd_fs_file *file);
++int httpd_sendfile_send(int outfd, struct httpd_fs_file *file,
++                        bool chunked);
+ 
+ #elif defined(CONFIG_NETUTILS_HTTPD_MMAP)
+ 
+diff --git a/netutils/webserver/Kconfig b/netutils/webserver/Kconfig
+--- a/netutils/webserver/Kconfig
++++ b/netutils/webserver/Kconfig
+@@ -161,6 +161,15 @@
+ 	depends on NETUTILS_HTTPD_MMAP || NETUTILS_HTTPD_SENDFILE
+ 	default "/mnt"
+ 
++config NETUTILS_HTTPD_INDEX
++	string "Directory index filename"
++	default "index.shtml" if NETUTILS_HTTPD_CLASSIC && !NETUTILS_HTTPD_SCRIPT_DISABLE
++	default "index.html"
++	---help---
++		Filename served for the document root and directory requests.  Filesystem
++		backends normally use index.html; the classic scripted backend retains
++		its historical index.shtml default.
++
+ config NETUTILS_HTTPD_KEEPALIVE_DISABLE
+ 	bool "Keepalive Disable"
+ 	default y
+diff --git a/netutils/webserver/httpd.c b/netutils/webserver/httpd.c
+--- a/netutils/webserver/httpd.c
++++ b/netutils/webserver/httpd.c
+@@ -121,13 +121,12 @@
+ #  endif
+ #endif
+ 
+-#ifdef CONFIG_NETUTILS_HTTPD_CLASSIC
+-#  ifndef CONFIG_NETUTILS_HTTPD_INDEX
+-#    ifndef CONFIG_NETUTILS_HTTPD_SCRIPT_DISABLE
+-#      define CONFIG_NETUTILS_HTTPD_INDEX "index.shtml"
+-#    else
+-#      define CONFIG_NETUTILS_HTTPD_INDEX "index.html"
+-#    endif
++#ifndef CONFIG_NETUTILS_HTTPD_INDEX
++#  if defined(CONFIG_NETUTILS_HTTPD_CLASSIC) && \
++      !defined(CONFIG_NETUTILS_HTTPD_SCRIPT_DISABLE)
++#    define CONFIG_NETUTILS_HTTPD_INDEX "index.shtml"
++#  else
++#    define CONFIG_NETUTILS_HTTPD_INDEX "index.html"
+ #  endif
+ #endif
+ 
+@@ -169,6 +168,117 @@
+   (void)phase;
+ }
+ 
++static int httpd_hexvalue(char ch)
++{
++  if (ch >= '0' && ch <= '9')
++    {
++      return ch - '0';
++    }
++
++  if (ch >= 'a' && ch <= 'f')
++    {
++      return ch - 'a' + 10;
++    }
++
++  if (ch >= 'A' && ch <= 'F')
++    {
++      return ch - 'A' + 10;
++    }
++
++  return ERROR;
++}
++
++static bool httpd_normalize_path(char *path)
++{
++  char *segment;
++  char *cursor;
++  char *src;
++  char *dst;
++
++  if (path == NULL || path[0] != '/')
++    {
++      return false;
++    }
++
++  cursor = strchr(path, '?');
++  if (cursor != NULL)
++    {
++      *cursor = '\0';
++    }
++
++  src = path;
++  dst = path;
++  while (*src != '\0')
++    {
++      unsigned char ch = (unsigned char)*src++;
++
++      if (ch == '%')
++        {
++          int high;
++          int low;
++
++          if (src[0] == '\0' || src[1] == '\0')
++            {
++              return false;
++            }
++
++          high = httpd_hexvalue(src[0]);
++          low = httpd_hexvalue(src[1]);
++
++          if (high < 0 || low < 0)
++            {
++              return false;
++            }
++
++          ch = (high << 4) | low;
++          src += 2;
++
++          /* Encoded separators are rejected rather than normalized so that
++           * every backend sees the same unambiguous path hierarchy.
++           */
++
++          if (ch == '/' || ch == '\\')
++            {
++              return false;
++            }
++        }
++
++      if (ch == '\0' || ch == '\\' || ch < ' ' || ch == 0x7f)
++        {
++          return false;
++        }
++
++      *dst++ = ch;
++    }
++
++  *dst = '\0';
++
++  segment = path + 1;
++  for (cursor = segment; ; cursor++)
++    {
++      size_t len;
++
++      if (*cursor != '/' && *cursor != '\0')
++        {
++          continue;
++        }
++
++      len = cursor - segment;
++      if ((len == 1 && segment[0] == '.') ||
++          (len == 2 && segment[0] == '.' && segment[1] == '.'))
++        {
++          return false;
++        }
++
++      if (*cursor == '\0')
++        {
++          return true;
++        }
++
++      segment = cursor + 1;
++    }
++}
++
+ static int httpd_send_retry(int sockfd, FAR const void *buf, size_t len)
+ {
+   FAR const uint8_t *ptr = (FAR const uint8_t *)buf;
+@@ -376,6 +486,10 @@
+ 
+ static int httpd_openindex(struct httpd_state *pstate)
+ {
++#if defined(CONFIG_NETUTILS_HTTPD_SENDFILE) || \
++    defined(CONFIG_NETUTILS_HTTPD_MMAP)
++  bool directory = false;
++#endif
+   int ret;
+   size_t z;
+ 
+@@ -388,16 +502,48 @@
+   ret = httpd_open(pstate->ht_filename, &pstate->ht_file);
+ #if defined(CONFIG_NETUTILS_HTTPD_SENDFILE) || \
+     defined(CONFIG_NETUTILS_HTTPD_MMAP)
+-#  if defined(CONFIG_NETUTILS_HTTPD_INDEX)
++#  if defined(CONFIG_NETUTILS_HTTPD_SENDFILE) && \
++      defined(CONFIG_NETUTILS_HTTPD_DIRLIST)
++  if (ret == OK && pstate->ht_file.fd < 0)
++    {
++      directory = true;
++    }
++#  endif
++
+   if (ret == ERROR && errno == EISDIR)
+     {
+-      snprintf(pstate->ht_filename + z,
+-               sizeof pstate->ht_filename - z, "/%s",
+-               CONFIG_NETUTILS_HTTPD_INDEX);
+-
+-      ret = httpd_open(pstate->ht_filename, &pstate->ht_file);
++      directory = true;
+     }
++
++  if (directory)
++    {
++      int indexlen;
++
++      indexlen = snprintf(pstate->ht_filename + z,
++                          sizeof pstate->ht_filename - z, "/%s",
++                          CONFIG_NETUTILS_HTTPD_INDEX);
++      if (indexlen < 0 ||
++          (size_t)indexlen >= sizeof(pstate->ht_filename) - z)
++        {
++          errno = ENAMETOOLONG;
++          ret = ERROR;
++        }
++      else
++        {
++          ret = httpd_open(pstate->ht_filename, &pstate->ht_file);
++        }
++
++#  if defined(CONFIG_NETUTILS_HTTPD_SENDFILE) && \
++      defined(CONFIG_NETUTILS_HTTPD_DIRLIST)
++      if (ret == ERROR)
++        {
++          /* Directory listing is the fallback, not the first choice. */
++
++          pstate->ht_filename[z] = '\0';
++          ret = httpd_open(pstate->ht_filename, &pstate->ht_file);
++        }
+ #  endif
++    }
+ #endif
+ 
+   return ret;
+@@ -577,33 +723,29 @@
+ {
+   int ret;
+ 
+-  do
+-    {
+-      int chunk = len;
++  if (len <= 0)
++    {
++      return OK;
++    }
+ 
+-      httpd_activity_hook("send");
+-      if (chunk > HTTPD_SEND_CHUNK_MAX)
+-        {
+-          chunk = HTTPD_SEND_CHUNK_MAX;
+-        }
++  /* httpd_send_retry() already divides the transfer into MSS-sized writes.
++   * Calling it once avoids reconfiguring the socket around every segment.
++   */
+ 
+-      httpd_dumpbuffer("Outgoing chunk", buf, chunk);
+-      ret = httpd_send_retry(pstate->ht_sockfd, buf, chunk);
+-      if (ret <= 0)
+-        {
+-          char phase[32];
++  httpd_activity_hook("send");
++  httpd_dumpbuffer("Outgoing chunk", buf,
++                   MIN(len, HTTPD_SEND_CHUNK_MAX));
++  ret = httpd_send_retry(pstate->ht_sockfd, buf, len);
++  if (ret != len)
++    {
++      char phase[32];
+ 
+-          snprintf(phase, sizeof(phase), "send-fail-%d", errno);
+-          httpd_activity_hook(phase);
+-          return ERROR;
+-        }
+-
+-      httpd_activity_hook("sent");
+-      buf += ret;
+-      len -= ret;
++      snprintf(phase, sizeof(phase), "send-fail-%d", errno);
++      httpd_activity_hook(phase);
++      return ERROR;
+     }
+-  while (len > 0);
+ 
++  httpd_activity_hook("sent");
+   return OK;
+ }
+ 
+@@ -775,9 +917,24 @@
+   if (httpd_send_headers(pstate, status,
+                    ret == OK ? pstate->ht_file.len : sizeof msg - 1) != OK)
+     {
++      if (ret == OK)
++        {
++          httpd_close(&pstate->ht_file);
++        }
++
+       return ERROR;
+     }
+ 
++  if (pstate->ht_method == HTTPD_METHOD_HEAD)
++    {
++      if (ret == OK)
++        {
++          httpd_close(&pstate->ht_file);
++        }
++
++      return OK;
++    }
++
+   if (ret != OK)
+     {
+       snprintf(msg, sizeof msg, "Error %d\n", status);
+@@ -790,7 +947,7 @@
+       ret = send_chunk(pstate, pstate->ht_file.data, pstate->ht_file.len);
+ #else
+ #ifdef CONFIG_NETUTILS_HTTPD_SENDFILE
+-      ret = httpd_sendfile_send(pstate->ht_sockfd, &pstate->ht_file);
++      ret = httpd_sendfile_send(pstate->ht_sockfd, &pstate->ht_file, false);
+ #endif
+ #endif
+ 
+@@ -828,6 +985,20 @@
+     }
+ #endif
+ 
++  /* DELETE and OPTIONS are available to registered URL/CGI handlers, but
++   * must never fall through and return a static file for an unknown route.
++   */
++
++  if (pstate->ht_method != HTTPD_METHOD_GET &&
++      pstate->ht_method != HTTPD_METHOD_HEAD)
++    {
++      static const char body[] = "Method Not Allowed\n";
++
++      return httpd_send_response(pstate, 405, "text/plain",
++                                 "Allow: GET, HEAD\r\n", body,
++                                 sizeof(body) - 1);
++    }
++
+   if (httpd_openindex(pstate) != OK)
+     {
+       nwarn("WARNING: [%d] '%s' not found\n",
+@@ -848,6 +1019,12 @@
+           goto done;
+         }
+ 
++      if (pstate->ht_method == HTTPD_METHOD_HEAD)
++        {
++          ret = OK;
++          goto done;
++        }
++
+       ret = handle_script(pstate);
+       goto done;
+     }
+@@ -866,13 +1043,24 @@
+     }
+ #endif
+ 
++  if (pstate->ht_method == HTTPD_METHOD_HEAD)
++    {
++      ret = OK;
++      goto done;
++    }
++
+ #ifdef CONFIG_NETUTILS_HTTPD_CLASSIC
+   ret = send_chunk(pstate, pstate->ht_file.data, pstate->ht_file.len);
+ #else
+ #ifdef CONFIG_NETUTILS_HTTPD_SENDFILE
+-  ret = httpd_sendfile_send(pstate->ht_sockfd, &pstate->ht_file);
++#if defined(CONFIG_NETUTILS_HTTPD_ENABLE_CHUNKED_ENCODING)
++  ret = httpd_sendfile_send(pstate->ht_sockfd, &pstate->ht_file,
++                            pstate->ht_chunked);
++#else
++  ret = httpd_sendfile_send(pstate->ht_sockfd, &pstate->ht_file, false);
+ #endif
+ #endif
++#endif
+ 
+ done:
+   httpd_close(&pstate->ht_file);
+@@ -1058,6 +1246,10 @@
+                 {
+                   pstate->ht_method = HTTPD_METHOD_GET;
+                 }
++              else if (strcmp(method, "HEAD") == 0)
++                {
++                  pstate->ht_method = HTTPD_METHOD_HEAD;
++                }
+               else if (strcmp(method, "POST") == 0)
+                 {
+ #ifdef CONFIG_NETUTILS_HTTPD_POST
+@@ -1080,15 +1272,19 @@
+                   return 501;
+                 }
+ 
+-              /* TODO: url decoding */
++              *v = '\0';
++              if (!httpd_normalize_path(path))
++                {
++                  nwarn("WARNING: unsafe or malformed request path\n");
++                  return 400;
++                }
+ 
+-              if (v - path >= sizeof pstate->ht_filename)
++              if (strlen(path) >= sizeof pstate->ht_filename)
+                 {
+                   nerr("ERROR: ht_filename overflow\n");
+                   return 414;
+                 }
+ 
+-              *v = '\0';
+               strlcpy(pstate->ht_filename, path,
+                       sizeof(pstate->ht_filename));
+               state = STATE_HEADER;
+@@ -1209,7 +1405,8 @@
+     }
+ 
+ #ifdef CONFIG_NETUTILS_HTTPD_CLASSIC
+-  if (pstate->ht_method == HTTPD_METHOD_GET &&
++  if ((pstate->ht_method == HTTPD_METHOD_GET ||
++       pstate->ht_method == HTTPD_METHOD_HEAD) &&
+       0 == strcmp(pstate->ht_filename, "/"))
+     {
+       strlcpy(pstate->ht_filename, "/" CONFIG_NETUTILS_HTTPD_INDEX,
+@@ -1282,8 +1479,17 @@
+           /* Then handle the next httpd command */
+ 
+           status = httpd_parse(pstate);
+-          if (status >= 400)
++          if (status < 0)
+             {
++              /* An empty health probe or a peer that closed before sending a
++               * request needs no response.  In particular, do not turn EOF
++               * into a static-file send on an uninitialized path.
++               */
++
++              httpd_activity_hook("peer-closed");
++            }
++          else if (status >= 400)
++            {
+               httpd_activity_hook("parse-error");
+               httpd_senderror(pstate, status);
+             }
+@@ -1323,15 +1529,6 @@
+ 
+   ninfo("[%d] Exiting\n", sockfd);
+   httpd_activity_hook("close");
+-
+-  /* Some small TCP stacks need a short drain window after the final response
+-   * write.  Closing immediately after send() can make stricter HTTP clients
+-   * observe resets and can leave the server-side TCP path unhealthy after a
+-   * handful of rapid MCP calls.
+-   */
+-
+-  usleep(100 * 1000);
+-  httpd_activity_hook("close-drain");
+   close(sockfd);
+   return NULL;
+ }
+@@ -1347,9 +1544,8 @@
+ #ifdef CONFIG_NET_SOLINGER
+   struct linger ling;
+ #endif
+-#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
+-  struct timeval tv;
+-#endif
++
++  (void)stacksize;
+ 
+   listensd = netlib_listenon(portno);
+   if (listensd < 0)
+@@ -1367,6 +1563,11 @@
+ 
+       if (acceptsd < 0)
+         {
++          if (errno == EINTR)
++            {
++              continue;
++            }
++
+           nerr("ERROR: accept failure: %d\n", errno);
+           break;
+         }
+@@ -1383,34 +1584,7 @@
+       if (setsockopt(acceptsd, SOL_SOCKET, SO_LINGER, &ling,
+                      sizeof(struct linger)) < 0)
+         {
+-          close(acceptsd);
+-          nerr("ERROR: setsockopt SO_LINGER failure: %d\n", errno);
+-          break;
+-        }
+-#endif
+-
+-#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
+-      /* Set up receive and send timeouts.  Single-connect mode handles the
+-       * request in the listener thread; a stalled peer must not pin the whole
+-       * webserver behind one accepted socket.
+-       */
+-
+-      tv.tv_sec  = CONFIG_NETUTILS_HTTPD_TIMEOUT;
+-      tv.tv_usec = 0;
+-      if (setsockopt(acceptsd, SOL_SOCKET, SO_RCVTIMEO, &tv,
+-                     sizeof(struct timeval)) < 0)
+-        {
+-          close(acceptsd);
+-          nerr("ERROR: setsockopt SO_RCVTIMEO failure: %d\n", errno);
+-          break;
+-        }
+-
+-      if (setsockopt(acceptsd, SOL_SOCKET, SO_SNDTIMEO, &tv,
+-                     sizeof(struct timeval)) < 0)
+-        {
+-          close(acceptsd);
+-          nerr("ERROR: setsockopt SO_SNDTIMEO failure: %d\n", errno);
+-          break;
++          nwarn("WARNING: setsockopt SO_LINGER failure: %d\n", errno);
+         }
+ #endif
+ 
+@@ -1605,7 +1779,7 @@
+ 
+       for (i = 0; i < nitems(a); i++)
+         {
+-          if (strncmp(a[i].ext, ptr + 1, strlen(a[i].ext)) == 0)
++          if (strcasecmp(a[i].ext, ptr + 1) == 0)
+             {
+               mime = a[i].mime;
+               break;
+diff --git a/netutils/webserver/httpd_cgi.c b/netutils/webserver/httpd_cgi.c
+--- a/netutils/webserver/httpd_cgi.c
++++ b/netutils/webserver/httpd_cgi.c
+@@ -63,6 +63,16 @@
+ 
+ void httpd_cgi_register(struct httpd_cgi_call *cgi_call)
+ {
++  struct httpd_cgi_call *iter;
++
++  for (iter = cgi_calls; iter != NULL; iter = iter->next)
++    {
++      if (iter == cgi_call)
++        {
++          return;
++        }
++    }
++
+   if (cgi_calls == NULL)
+     {
+       cgi_calls = cgi_call;
+@@ -83,7 +93,10 @@
+   struct httpd_cgi_call *cgi_call = cgi_calls;
+   while (cgi_call != NULL)
+     {
+-      if (strncmp(cgi_call->name, name, strlen(cgi_call->name)) == 0)
++      size_t namelen = strlen(cgi_call->name);
++
++      if (strncmp(cgi_call->name, name, namelen) == 0 &&
++          (cgi_call->name[0] != '/' || name[namelen] == '\0'))
+         {
+           return cgi_call->function;
+         }
+diff --git a/netutils/webserver/httpd_dirlist.c b/netutils/webserver/httpd_dirlist.c
+--- a/netutils/webserver/httpd_dirlist.c
++++ b/netutils/webserver/httpd_dirlist.c
+@@ -135,7 +135,8 @@
+  * Name: httpd_dirlist
+  ****************************************************************************/
+ 
+-ssize_t httpd_dirlist(int outfd, FAR struct httpd_fs_file *file)
++ssize_t httpd_dirlist(int outfd, FAR struct httpd_fs_file *file,
++                      bool chunked)
+ {
+   struct dirent *dent;
+   struct utsname info;
+@@ -155,7 +156,11 @@
+ 
+   /* exclude document root path */
+ 
+-  path = file->path + sizeof(CONFIG_NETUTILS_HTTPD_PATH);
++  path = file->path + strlen(CONFIG_NETUTILS_HTTPD_PATH);
++  if (*path == '/')
++    {
++      path++;
++    }
+ 
+   /* compose hdr/title/path/table and write them */
+ 
+@@ -170,7 +175,7 @@
+                path, path);
+     }
+ 
+-  ret = write(outfd, tmp, strlen(tmp));
++  ret = httpd_send_datachunk(outfd, tmp, strlen(tmp), chunked);
+ 
+   if (-1 == ret)
+     {
+@@ -234,7 +239,7 @@
+                    );
+         }
+ 
+-      ret = write(outfd, tmp, strlen(tmp));
++      ret = httpd_send_datachunk(outfd, tmp, strlen(tmp), chunked);
+ 
+       if (-1 == ret)
+         {
+@@ -257,13 +262,21 @@
+            info.machine,
+            BOARD_NAME);
+ 
+-  ret = write(outfd, tmp, strlen(tmp));
++  ret = httpd_send_datachunk(outfd, tmp, strlen(tmp), chunked);
+ 
+-  if (-1 != ret)
++  if (ret < 0)
+     {
+-      total += ret;
++      goto errout;
+     }
+ 
++  total += ret;
++
++  if (chunked &&
++      httpd_send_datachunk(outfd, NULL, 0, true) < 0)
++    {
++      goto errout;
++    }
++
+   ret = total;
+ 
+ errout:
+diff --git a/netutils/webserver/httpd_fs.c b/netutils/webserver/httpd_fs.c
+--- a/netutils/webserver/httpd_fs.c
++++ b/netutils/webserver/httpd_fs.c
+@@ -41,6 +41,7 @@
+ 
+ #include <stdint.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ #include "netutils/httpd.h"
+ 
+@@ -62,25 +63,9 @@
+  * Private Functions
+  ****************************************************************************/
+ 
+-static uint8_t httpd_fs_strcmp(const char *str1, const char *str2)
++static bool httpd_fs_match(const char *request, const char *name)
+ {
+-  int i;
+-
+-  i = 0;
+-  for (;;)
+-    {
+-      if (str2[i] == 0 || str1[i] == '\r' || str1[i] == '\n')
+-        {
+-          return 0;
+-        }
+-
+-      if (str1[i] != str2[i])
+-        {
+-          return 1;
+-        }
+-
+-      i++;
+-    }
++  return strcmp(request, name) == 0;
+ }
+ 
+ /****************************************************************************
+@@ -98,7 +83,7 @@
+        f != NULL;
+        f = (struct httpd_fsdata_file_noconst *)f->next)
+     {
+-      if (httpd_fs_strcmp(name, f->name) == 0)
++      if (httpd_fs_match(name, f->name))
+         {
+           file->data = f->data;
+           file->len  = f->len;
+@@ -140,7 +125,7 @@
+       f != NULL;
+       f = (struct httpd_fsdata_file_noconst *)f->next)
+     {
+-      if (httpd_fs_strcmp(name, f->name) == 0)
++      if (httpd_fs_match(name, f->name))
+         {
+           return count[i];
+         }
+diff --git a/netutils/webserver/httpd_sendfile.c b/netutils/webserver/httpd_sendfile.c
+--- a/netutils/webserver/httpd_sendfile.c
++++ b/netutils/webserver/httpd_sendfile.c
+@@ -34,6 +34,7 @@
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <string.h>
+ #include <errno.h>
+ #include <nuttx/debug.h>
+ 
+@@ -42,22 +43,101 @@
+ #include "httpd.h"
+ 
+ /****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define HTTPD_SENDFILE_RETRY_DELAY_US 10000
++#if CONFIG_NETUTILS_HTTPD_TIMEOUT > 0
++#  define HTTPD_SENDFILE_RETRY_MAX (CONFIG_NETUTILS_HTTPD_TIMEOUT * 100)
++#else
++#  define HTTPD_SENDFILE_RETRY_MAX 500
++#endif
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++static bool httpd_sendfile_path_safe(const char *name)
++{
++  const char *segment;
++  const char *cursor;
++
++  if (name == NULL)
++    {
++      return false;
++    }
++
++  /* httpd_openindex() temporarily turns the URL "/" into an empty suffix
++   * while it probes the configured document root.  No other relative path is
++   * valid here.
++   */
++
++  if (*name == '\0')
++    {
++      return true;
++    }
++
++  if (*name != '/' || strchr(name, '\\') != NULL)
++    {
++      return false;
++    }
++
++  segment = name + 1;
++  for (cursor = segment; ; cursor++)
++    {
++      size_t len;
++      unsigned char ch = (unsigned char)*cursor;
++
++      if ((ch != '\0' && ch < ' ') || ch == 0x7f)
++        {
++          return false;
++        }
++
++      if (ch != '/' && ch != '\0')
++        {
++          continue;
++        }
++
++      len = cursor - segment;
++      if ((len == 1 && segment[0] == '.') ||
++          (len == 2 && segment[0] == '.' && segment[1] == '.'))
++        {
++          return false;
++        }
++
++      if (ch == '\0')
++        {
++          return true;
++        }
++
++      segment = cursor + 1;
++    }
++}
++
++/****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+ 
+ int httpd_sendfile_open(const char *name, struct httpd_fs_file *file)
+ {
+   struct stat st;
++  int pathlen;
++  int errcode;
+ 
+-  if (sizeof(file->path) < snprintf(file->path, sizeof(file->path), "%s%s",
+-      CONFIG_NETUTILS_HTTPD_PATH, name))
++  if (!httpd_sendfile_path_safe(name))
+     {
++      errno = EACCES;
++      return ERROR;
++    }
++
++  pathlen = snprintf(file->path, sizeof(file->path), "%s%s",
++                     CONFIG_NETUTILS_HTTPD_PATH, name);
++  if (pathlen < 0 || (size_t)pathlen >= sizeof(file->path))
++    {
+       errno = ENAMETOOLONG;
+       return ERROR;
+     }
+ 
+-  /* XXX: awaiting fstat to avoid a race */
+-
+   if (-1 == stat(file->path, &st))
+     {
+       return ERROR;
+@@ -77,14 +157,6 @@
+     }
+ #endif
+ 
+-  if (st.st_size > INT_MAX || st.st_size > SIZE_MAX)
+-    {
+-      errno = EFBIG;
+-      return ERROR;
+-    }
+-
+-  file->len = (int) st.st_size;
+-
+   if (S_ISDIR(st.st_mode))
+     {
+       /* we assume -1 as a directory */
+@@ -94,16 +166,51 @@
+   else
+     {
+       file->fd = open(file->path, O_RDONLY);
++      if (file->fd < 0)
++        {
++          return ERROR;
++        }
+     }
+ 
+-#ifndef CONFIG_NETUTILS_HTTPD_DIRLIST
+-  if (file->fd == -1)
++  /* Revalidate the opened object.  FTP can replace content while HTTP is
++   * opening it, so the length and type used for the response must come from
++   * the descriptor that will actually be sent.
++   */
++
++  if (file->fd >= 0)
+     {
+-      return ERROR;
++      if (fstat(file->fd, &st) < 0)
++        {
++          goto errout_with_fd;
++        }
++
++      if (!S_ISREG(st.st_mode))
++        {
++          errno = S_ISDIR(st.st_mode) ? EISDIR : ENOENT;
++          goto errout_with_fd;
++        }
+     }
+-#endif
+ 
++  if (st.st_size < 0 || st.st_size > INT_MAX || st.st_size > SIZE_MAX)
++    {
++      errno = EFBIG;
++      goto errout_with_fd;
++    }
++
++  file->len = (int)st.st_size;
++
+   return OK;
++
++errout_with_fd:
++  errcode = errno;
++  if (file->fd >= 0)
++    {
++      close(file->fd);
++      file->fd = -1;
++    }
++
++  errno = errcode;
++  return ERROR;
+ }
+ 
+ int httpd_sendfile_close(struct httpd_fs_file *file)
+@@ -125,14 +232,22 @@
+   return OK;
+ }
+ 
+-int httpd_sendfile_send(int outfd, struct httpd_fs_file *file)
++int httpd_sendfile_send(int outfd, struct httpd_fs_file *file,
++                        bool chunked)
+ {
++  off_t offset = 0;
++  unsigned int retries = 0;
++
++#ifndef CONFIG_NETUTILS_HTTPD_DIRLIST
++  (void)chunked;
++#endif
++
+ #ifdef CONFIG_NETUTILS_HTTPD_DIRLIST
+   if (-1 == file->fd)
+     {
+       /* we assume that it's a directory */
+ 
+-      if (-1 == httpd_dirlist(outfd, file))
++      if (-1 == httpd_dirlist(outfd, file, chunked))
+         {
+           return ERROR;
+         }
+@@ -141,9 +256,43 @@
+     }
+ #endif
+ 
+-  if (-1 == sendfile(outfd, file->fd, 0, file->len))
++  while (offset < file->len)
+     {
+-      return ERROR;
++      off_t before = offset;
++      ssize_t nsent = sendfile(outfd, file->fd, &offset,
++                               (size_t)(file->len - offset));
++
++      if (nsent > 0)
++        {
++          /* Trust the returned byte count even if a backend neglected to
++           * update the explicit offset on a legal partial transfer.
++           */
++
++          offset = before + nsent;
++          retries = 0;
++          httpd_activity_hook("sendfile-progress");
++          continue;
++        }
++
++      if (nsent < 0 && errno != EINTR && errno != EAGAIN &&
++          errno != EWOULDBLOCK)
++        {
++          return ERROR;
++        }
++
++      /* EINTR, EAGAIN, and a zero-byte transfer are retryable, but a peer
++       * must not retain a worker forever without making progress.
++       */
++
++      offset = before;
++      if (retries++ >= HTTPD_SENDFILE_RETRY_MAX)
++        {
++          errno = ETIMEDOUT;
++          return ERROR;
++        }
++
++      httpd_activity_hook(nsent == 0 ? "sendfile-zero" : "sendfile-wait");
++      usleep(HTTPD_SENDFILE_RETRY_DELAY_US);
+     }
+ 
+   return OK;
+

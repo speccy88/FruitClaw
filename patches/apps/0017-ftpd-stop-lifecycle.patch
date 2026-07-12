@@ -1,0 +1,1383 @@
+diff --git a/include/netutils/ftpd.h b/include/netutils/ftpd.h
+index f92308f..1e85471 100644
+--- a/include/netutils/ftpd.h
++++ b/include/netutils/ftpd.h
+@@ -209,6 +209,26 @@ int ftpd_adduser(FTPD_SESSION handle, uint8_t accountflags,
+ 
+ int ftpd_session(FTPD_SESSION handle, int timeout);
+ 
++/****************************************************************************
++ * Name: ftpd_shutdown
++ *
++ * Description:
++ *   Stop accepting new FTP connections and request all active worker
++ *   sessions to exit.  The handle remains valid until ftpd_close() returns.
++ *   This function is idempotent and may be called from a thread other than
++ *   the one blocked in ftpd_session().
++ *
++ * Input Parameters:
++ *   handle - A handle previously returned by ftpd_open
++ *
++ * Returned Value:
++ *   Zero is returned on success.  A negated errno value is returned on
++ *   failure.
++ *
++ ****************************************************************************/
++
++int ftpd_shutdown(FTPD_SESSION handle);
++
+ /****************************************************************************
+  * Name: ftpd_close
+  *
+diff --git a/netutils/ftpd/ftpd.h b/netutils/ftpd/ftpd.h
+index 925be62..87c8245 100644
+--- a/netutils/ftpd/ftpd.h
++++ b/netutils/ftpd/ftpd.h
+@@ -31,6 +31,7 @@
+ 
+ #include <sys/types.h>
+ #include <stdbool.h>
++#include <pthread.h>
+ 
+ #include <netinet/in.h>
+ 
+@@ -87,6 +88,8 @@ union ftpd_sockaddr_u
+ #endif
+ };
+ 
++struct ftpd_session_s;
++
+ /* This structure describes on account */
+ 
+ struct ftpd_account_s
+@@ -103,10 +106,16 @@ struct ftpd_account_s
+ 
+ struct ftpd_server_s
+ {
+-  int                        sd;     /* Listen socket descriptor */
+-  union ftpd_sockaddr_u      addr;   /* Listen address */
+-  FAR struct ftpd_account_s *head;   /* Head of a list of accounts */
+-  FAR struct ftpd_account_s *tail;   /* Tail of a list of accounts */
++  int                        sd;       /* Listen socket descriptor */
++  union ftpd_sockaddr_u      addr;     /* Listen address */
++  FAR struct ftpd_account_s *head;     /* Head of a list of accounts */
++  FAR struct ftpd_account_s *tail;     /* Tail of a list of accounts */
++  FAR struct ftpd_session_s *sessions; /* Active worker sessions */
++  pthread_mutex_t            lock;     /* Protects server lifecycle */
++  pthread_cond_t             cond;     /* Signals worker completion */
++  unsigned int               callers;  /* Calls using the listen socket */
++  unsigned int               workers;  /* Workers not fully released */
++  bool                       shutdown; /* Server shutdown requested */
+ };
+ 
+ struct ftpd_stream_s
+@@ -120,8 +129,13 @@ struct ftpd_stream_s
+ 
+ struct ftpd_session_s
+ {
+-  FAR const struct ftpd_server_s  *server;
+-  FAR const struct ftpd_account_s *head;
++  FAR struct ftpd_server_s   *server;
++  FAR struct ftpd_session_s  *flink;
++  FAR struct ftpd_account_s  *head;
++  pthread_mutex_t             lock;
++  bool                        registered;
++  bool                        counted;
++  bool                        shutdown;
+   bool                             loggedin;
+   uint8_t                          flags;   /* See TPD_SESSIONFLAG_* definitions */
+   int                              rxtimeout;
+diff --git a/netutils/ftpd/ftpd.c b/netutils/ftpd/ftpd.c
+index b47df1e..d405403 100644
+--- a/netutils/ftpd/ftpd.c
++++ b/netutils/ftpd/ftpd.c
+@@ -71,6 +71,16 @@
+ 
+ #include "ftpd.h"
+ 
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++/* Polling is bounded while a listener is idle so that ftpd_shutdown() can
++ * stop a server without closing a descriptor out from under poll().
++ */
++
++#define FTPD_SHUTDOWN_POLL_INTERVAL_MS 250
++
+ /****************************************************************************
+  * Private Function Prototypes
+  ****************************************************************************/
+@@ -80,6 +90,8 @@
+ static FAR struct ftpd_account_s *ftpd_account_new(FAR const char *user,
+                                                    uint8_t accountflags);
+ static void ftpd_account_free(FAR struct ftpd_account_s *account);
++static int ftpd_account_clone(FAR const struct ftpd_account_s *account,
++                              FAR struct ftpd_account_s **clone);
+ static int ftpd_account_setpassword(FAR struct ftpd_account_s *account,
+                                     FAR const char *passwd);
+ static int ftpd_account_add(FAR struct ftpd_server_s *server,
+@@ -106,6 +118,12 @@ static int ftpd_rxpoll(int sd, int timeout);
+ static int ftpd_txpoll(int sd, int timeout);
+ static int ftpd_accept(int sd, FAR void *addr, FAR socklen_t *addrlen,
+                         int timeout);
++static int ftpd_serveraccept(FAR struct ftpd_server_s *server,
++                             FAR void *addr, FAR socklen_t *addrlen,
++                             int timeout);
++static int ftpd_dataaccept(FAR struct ftpd_session_s *session, int sd,
++                           FAR void *addr, FAR socklen_t *addrlen,
++                           int timeout);
+ static int ftpd_connect(int sd, FAR const struct sockaddr *addr,
+                         socklen_t addrlen, int timeout);
+ static ssize_t ftpd_recv(int sd, FAR void *data, size_t size, int timeout);
+@@ -115,6 +133,7 @@ static ssize_t ftpd_response(int sd, int timeout, FAR const char *fmt, ...)
+                printf_like(3, 4);
+ 
+ static int ftpd_dataopen(FAR struct ftpd_session_s *session);
++static int ftpd_dataassign(FAR struct ftpd_session_s *session, int sd);
+ static int ftpd_dataclose(FAR struct ftpd_session_s *session);
+ static bool ftpd_datahost_matches(FAR struct ftpd_session_s *session,
+                                   FAR const union ftpd_sockaddr_u *addr);
+@@ -376,6 +395,70 @@ static void ftpd_account_free(FAR struct ftpd_account_s *account)
+     }
+ }
+ 
++/****************************************************************************
++ * Name: ftpd_account_clone
++ ****************************************************************************/
++
++static int ftpd_account_clone(FAR const struct ftpd_account_s *account,
++                              FAR struct ftpd_account_s **clone)
++{
++  FAR struct ftpd_account_s *head = NULL;
++  FAR struct ftpd_account_s *tail = NULL;
++  FAR struct ftpd_account_s *newaccount;
++  int ret;
++
++  DEBUGASSERT(clone != NULL);
++  *clone = NULL;
++
++  while (account != NULL)
++    {
++      newaccount = ftpd_account_new(account->user, account->flags);
++      if (newaccount == NULL)
++        {
++          ret = -ENOMEM;
++          goto errout;
++        }
++
++      ret = ftpd_account_setpassword(newaccount, account->password);
++      if (ret < 0)
++        {
++          ftpd_account_free(newaccount);
++          goto errout;
++        }
++
++      ret = ftpd_account_sethome(newaccount, account->home);
++      if (ret < 0)
++        {
++          ftpd_account_free(newaccount);
++          goto errout;
++        }
++
++      newaccount->blink = tail;
++      if (tail == NULL)
++        {
++          head = newaccount;
++        }
++      else
++        {
++          tail->flink = newaccount;
++        }
++
++      tail = newaccount;
++      account = account->flink;
++    }
++
++  *clone = head;
++  return OK;
++
++errout:
++  if (head != NULL)
++    {
++      ftpd_account_free(head);
++    }
++
++  return ret;
++}
++
+ /****************************************************************************
+  * Name: ftpd_account_setpassword
+  ****************************************************************************/
+@@ -1026,6 +1109,145 @@ static int ftpd_accept(int sd, FAR void *addr, FAR socklen_t *addrlen,
+   return acceptsd;
+ }
+ 
++/****************************************************************************
++ * Name: ftpd_serveraccept
++ ****************************************************************************/
++
++static int ftpd_serveraccept(FAR struct ftpd_server_s *server,
++                             FAR void *addr, FAR socklen_t *addrlen,
++                             int timeout)
++{
++  int remaining = timeout;
++  int acceptsd;
++  int slice;
++  int sd;
++  int ret;
++
++  for (; ; )
++    {
++      pthread_mutex_lock(&server->lock);
++      if (server->shutdown || server->sd < 0)
++        {
++          pthread_mutex_unlock(&server->lock);
++          return -ESHUTDOWN;
++        }
++
++      sd = server->sd;
++      pthread_mutex_unlock(&server->lock);
++
++      if (remaining < 0 || remaining > FTPD_SHUTDOWN_POLL_INTERVAL_MS)
++        {
++          slice = FTPD_SHUTDOWN_POLL_INTERVAL_MS;
++        }
++      else
++        {
++          slice = remaining;
++        }
++
++      ret = ftpd_rxpoll(sd, slice);
++      if (ret == -ETIMEDOUT)
++        {
++          if (timeout == 0)
++            {
++              return ret;
++            }
++
++          if (remaining > 0)
++            {
++              remaining -= slice;
++              if (remaining <= 0)
++                {
++                  return ret;
++                }
++            }
++
++          continue;
++        }
++      else if (ret < 0)
++        {
++          return ret;
++        }
++
++      /* Serialize the shutdown check and accept.  The listen socket is
++       * non-blocking, so this lock cannot be held across an indefinite
++       * accept if another caller consumed the pending connection.
++       */
++
++      pthread_mutex_lock(&server->lock);
++      if (server->shutdown || server->sd != sd)
++        {
++          pthread_mutex_unlock(&server->lock);
++          return -ESHUTDOWN;
++        }
++
++      acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen,
++                         SOCK_CLOEXEC);
++      if (acceptsd < 0)
++        {
++          ret = -errno;
++          pthread_mutex_unlock(&server->lock);
++          return ret;
++        }
++
++      pthread_mutex_unlock(&server->lock);
++      return acceptsd;
++    }
++}
++
++/****************************************************************************
++ * Name: ftpd_dataaccept
++ ****************************************************************************/
++
++static int ftpd_dataaccept(FAR struct ftpd_session_s *session, int sd,
++                           FAR void *addr, FAR socklen_t *addrlen,
++                           int timeout)
++{
++  int remaining = timeout;
++  int slice;
++  int ret;
++
++  for (; ; )
++    {
++      pthread_mutex_lock(&session->lock);
++      if (session->shutdown)
++        {
++          pthread_mutex_unlock(&session->lock);
++          return -ESHUTDOWN;
++        }
++
++      pthread_mutex_unlock(&session->lock);
++
++      if (remaining < 0 || remaining > FTPD_SHUTDOWN_POLL_INTERVAL_MS)
++        {
++          slice = FTPD_SHUTDOWN_POLL_INTERVAL_MS;
++        }
++      else
++        {
++          slice = remaining;
++        }
++
++      ret = ftpd_accept(sd, addr, addrlen, slice);
++      if (ret != -ETIMEDOUT)
++        {
++          return ret;
++        }
++
++      if (timeout == 0)
++        {
++          return ret;
++        }
++
++      if (remaining > 0)
++        {
++          remaining -= slice;
++          if (remaining <= 0)
++            {
++              return ret;
++            }
++        }
++    }
++}
++
+ /****************************************************************************
+  * Name: ftpd_connect
+  ****************************************************************************/
+@@ -1212,6 +1434,40 @@ static ssize_t ftpd_response(int sd, int timeout, FAR const char *fmt, ...)
+   return bytessent;
+ }
+ 
++/****************************************************************************
++ * Name: ftpd_dataassign
++ ****************************************************************************/
++
++static int ftpd_dataassign(FAR struct ftpd_session_s *session, int sd)
++{
++  int ret = OK;
++
++  DEBUGASSERT(sd >= 0);
++
++  pthread_mutex_lock(&session->lock);
++  if (session->shutdown)
++    {
++      ret = -ESHUTDOWN;
++    }
++  else if (session->data.sd >= 0)
++    {
++      ret = -EBUSY;
++    }
++  else
++    {
++      session->data.sd = sd;
++    }
++
++  pthread_mutex_unlock(&session->lock);
++
++  if (ret < 0)
++    {
++      close(sd);
++    }
++
++  return ret;
++}
++
+ /****************************************************************************
+  * Name: ftpd_dataopen
+  ****************************************************************************/
+@@ -1219,6 +1475,7 @@ static ssize_t ftpd_response(int sd, int timeout, FAR const char *fmt, ...)
+ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+ {
+   socklen_t addrlen;
++  int listensd;
+   int sd;
+   int ret;
+ 
+@@ -1229,17 +1486,17 @@ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+ #ifdef CONFIG_NET_IPv6
+       if (session->data.addr.ss.ss_family == AF_INET6)
+         {
+-          session->data.sd = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP);
++          sd = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP);
+         }
+       else
+         {
+-          session->data.sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
++          sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+         }
+ #else
+-      session->data.sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
++      sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+ #endif
+ 
+-      if (session->data.sd < 0)
++      if (sd < 0)
+         {
+           int errval = errno;
+           nerr("ERROR: socket() failed: %d\n", errval);
+@@ -1248,6 +1505,12 @@ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+           return -errval;
+         }
+ 
++      ret = ftpd_dataassign(session, sd);
++      if (ret < 0)
++        {
++          return ret;
++        }
++
+ #ifdef CONFIG_NET_IPv4
+       if (session->data.addr.ss.ss_family == AF_INET)
+         {
+@@ -1299,10 +1562,11 @@ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+ 
+   /* PASV session */
+ 
++  listensd = session->data.sd;
+   session->data.addrlen = sizeof(session->data.addr);
+-  sd = ftpd_accept(session->data.sd,
+-                   (struct sockaddr *)(&session->data.addr),
+-                   &session->data.addrlen, session->pasvtimeout);
++  sd = ftpd_dataaccept(session, listensd,
++                       (struct sockaddr *)(&session->data.addr),
++                       &session->data.addrlen, session->pasvtimeout);
+   if (sd < 0)
+     {
+       nerr("ERROR: ftpd_accept() failed: %d\n", sd);
+@@ -1314,8 +1578,26 @@ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+       return sd;
+     }
+ 
+-  close(session->data.sd);
+-  session->data.sd = sd;
++  pthread_mutex_lock(&session->lock);
++  if (session->shutdown || session->data.sd != listensd)
++    {
++      ret = -ESHUTDOWN;
++    }
++  else
++    {
++      session->data.sd = sd;
++      ret = OK;
++    }
++
++  pthread_mutex_unlock(&session->lock);
++  if (ret < 0)
++    {
++      close(sd);
++      ftpd_dataclose(session);
++      return ret;
++    }
++
++  close(listensd);
+ 
+   if (!ftpd_datahost_matches(session, &session->data.addr))
+     {
+@@ -1347,10 +1629,16 @@ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+ 
+ static int ftpd_dataclose(FAR struct ftpd_session_s *session)
+ {
+-  if (session->data.sd >= 0)
++  int sd;
++
++  pthread_mutex_lock(&session->lock);
++  sd = session->data.sd;
++  session->data.sd = -1;
++  pthread_mutex_unlock(&session->lock);
++
++  if (sd >= 0)
+     {
+-      close(session->data.sd);
+-      session->data.sd = -1;
++      close(sd);
+     }
+ 
+   return OK;
+@@ -1398,6 +1686,7 @@ static FAR struct ftpd_server_s *ftpd_openserver(int port,
+ #else
+   int backlog = 5;
+ #endif
++  int flags;
+   int ret;
+ 
+   /* Allocate the server instance */
+@@ -1411,9 +1700,30 @@ static FAR struct ftpd_server_s *ftpd_openserver(int port,
+ 
+   /* Initialize the server instance */
+ 
+-  server->sd   = -1;
+-  server->head = NULL;
+-  server->tail = NULL;
++  server->sd       = -1;
++  server->head     = NULL;
++  server->tail     = NULL;
++  server->sessions = NULL;
++  server->callers  = 0;
++  server->workers  = 0;
++  server->shutdown = false;
++
++  ret = pthread_mutex_init(&server->lock, NULL);
++  if (ret != 0)
++    {
++      nerr("ERROR: pthread_mutex_init() failed: %d\n", ret);
++      free(server);
++      return NULL;
++    }
++
++  ret = pthread_cond_init(&server->cond, NULL);
++  if (ret != 0)
++    {
++      nerr("ERROR: pthread_cond_init() failed: %d\n", ret);
++      pthread_mutex_destroy(&server->lock);
++      free(server);
++      return NULL;
++    }
+ 
+   /* Create the server listen socket */
+ 
+@@ -1447,6 +1757,7 @@ static FAR struct ftpd_server_s *ftpd_openserver(int port,
+ #endif
+     {
+       nerr("ERROR: Unsupported family\n");
++      ftpd_close((FTPD_SESSION)server);
+       return NULL;
+     }
+ 
+@@ -1480,6 +1791,17 @@ static FAR struct ftpd_server_s *ftpd_openserver(int port,
+       return NULL;
+     }
+ 
++  /* A non-blocking listener lets the serialized accept path safely handle
++   * a spurious readiness notification without holding the server lock.
++   */
++
++  flags = fcntl(server->sd, F_GETFL, 0);
++  if (flags < 0 || fcntl(server->sd, F_SETFL, flags | O_NONBLOCK) < 0)
++    {
++      ftpd_close((FTPD_SESSION)server);
++      return NULL;
++    }
++
+   return (FTPD_SESSION)server;
+ }
+ 
+@@ -3362,21 +3684,27 @@ static int ftpd_command_pasv(FAR struct ftpd_session_s *session)
+ #ifdef CONFIG_NET_IPv4
+   unsigned int value[6];
+   unsigned int temp;
++  int sd;
+   int ret;
+ 
+   ftpd_dataclose(session);
+ 
+   session->data.addrlen = sizeof(session->data.addr);
+ 
+-  session->data.sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+-  if (session->data.sd < 0)
++  sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
++  if (sd < 0)
+     {
+-      ftpd_dataclose(session);
+       return ftpd_response(session->cmd.sd, session->txtimeout,
+                            g_respfmt1, 425, ' ',
+                            "PASV socket create fail !");
+     }
+ 
++  ret = ftpd_dataassign(session, sd);
++  if (ret < 0)
++    {
++      return ret;
++    }
++
+   ret = getsockname(session->cmd.sd,
+                     (FAR struct sockaddr *)&session->data.addr,
+                     &session->data.addrlen);
+@@ -3479,6 +3807,7 @@ static int ftpd_command_pasv(FAR struct ftpd_session_s *session)
+ 
+ static int ftpd_command_epsv(FAR struct ftpd_session_s *session)
+ {
++  int sd;
+   int ret;
+ 
+   ftpd_dataclose(session);
+@@ -3486,30 +3815,35 @@ static int ftpd_command_epsv(FAR struct ftpd_session_s *session)
+   session->data.addrlen = sizeof(session->data.addr);
+ 
+ #ifdef CONFIG_NET_IPv6
+-  session->data.sd = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP);
+-  if (session->data.sd < 0)
++  sd = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP);
++  if (sd < 0)
+     {
+ #ifdef CONFIG_NET_IPv4
+-      session->data.sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
++      sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+ #endif
+     }
+   else
+     {
+ #if defined(IPPROTO_IPV6) && defined(IPV6_V6ONLY)
+       int ipv6only = 0;
+-      setsockopt(session->data.sd, IPPROTO_IPV6, IPV6_V6ONLY,
+-                 &ipv6only, sizeof(ipv6only));
++      setsockopt(sd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6only,
++                 sizeof(ipv6only));
+ #endif
+     }
+ #else
+-  session->data.sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
++  sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+ #endif
+ 
+-  if (session->data.sd < 0)
++  if (sd < 0)
+     {
+       ret = ftpd_response(session->cmd.sd, session->txtimeout,
+                           g_respfmt1, 500, ' ', "EPSV socket create fail !");
+-      ftpd_dataclose(session);
++      return ret;
++    }
++
++  ret = ftpd_dataassign(session, sd);
++  if (ret < 0)
++    {
+       return ret;
+     }
+ 
+@@ -4237,21 +4571,24 @@ static int ftpd_startworker(pthread_startroutine_t handler, FAR void *arg,
+       goto errout_with_attr;
+     }
+ 
+-  /* And create the thread */
++  /* Create the worker detached from the outset.  Detaching after create
++   * leaves an unsafe failure case where the worker is already using arg.
++   */
+ 
+-  ret = pthread_create(&threadid, &attr, handler, arg);
++  ret = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+   if (ret != 0)
+     {
+-      nerr("ERROR: pthread_create() failed: %d\n", ret);
++      nerr("ERROR: pthread_attr_setdetachstate() failed: %d\n", ret);
+       goto errout_with_attr;
+     }
+ 
+-  /* Put the thread in the detached stated */
++  /* And create the thread */
+ 
+-  ret = pthread_detach(threadid);
++  ret = pthread_create(&threadid, &attr, handler, arg);
+   if (ret != 0)
+     {
+-      nerr("ERROR: pthread_detach() failed: %d\n", ret);
++      nerr("ERROR: pthread_create() failed: %d\n", ret);
++      goto errout_with_attr;
+     }
+ 
+ errout_with_attr:
+@@ -4266,6 +4603,33 @@ errout:
+ 
+ static void ftpd_freesession(FAR struct ftpd_session_s *session)
+ {
++  FAR struct ftpd_server_s *server = session->server;
++  FAR struct ftpd_session_s **link;
++
++  /* Remove the session from the shutdown-visible list before closing any
++   * descriptors.  The worker count remains elevated until every descriptor
++   * is closed, preventing ftpd_close() from freeing the server too early.
++   */
++
++  if (session->registered)
++    {
++      pthread_mutex_lock(&server->lock);
++      link = &server->sessions;
++      while (*link != NULL && *link != session)
++        {
++          link = &(*link)->flink;
++        }
++
++      if (*link == session)
++        {
++          *link = session->flink;
++        }
++
++      session->flink = NULL;
++      session->registered = false;
++      pthread_mutex_unlock(&server->lock);
++    }
++
+   /* Free resources */
+ 
+   if (session->renamefrom != NULL)
+@@ -4291,6 +4655,7 @@ static void ftpd_freesession(FAR struct ftpd_session_s *session)
+   if (session->fd >= 0)
+     {
+       close(session->fd);
++      session->fd = -1;
+     }
+ 
+   if (session->data.buffer != NULL)
+@@ -4308,6 +4673,29 @@ static void ftpd_freesession(FAR struct ftpd_session_s *session)
+   if (session->cmd.sd >= 0)
+     {
+       close(session->cmd.sd);
++      session->cmd.sd = -1;
++    }
++
++  if (session->head != NULL)
++    {
++      ftpd_account_free(session->head);
++      session->head = NULL;
++    }
++
++  pthread_mutex_destroy(&session->lock);
++
++  if (session->counted)
++    {
++      pthread_mutex_lock(&server->lock);
++      DEBUGASSERT(server->workers > 0);
++      server->workers--;
++      session->counted = false;
++      if (server->workers == 0)
++        {
++          pthread_cond_broadcast(&server->cond);
++        }
++
++      pthread_mutex_unlock(&server->lock);
+     }
+ 
+   free(session);
+@@ -4592,7 +4980,17 @@ int ftpd_adduser(FTPD_SESSION handle, uint8_t accountflags,
+     }
+ 
+   server = (FAR struct ftpd_server_s *)handle;
+-  ret = ftpd_account_add(server, newaccount);
++  pthread_mutex_lock(&server->lock);
++  if (server->shutdown)
++    {
++      ret = -ESHUTDOWN;
++    }
++  else
++    {
++      ret = ftpd_account_add(server, newaccount);
++    }
++
++  pthread_mutex_unlock(&server->lock);
+   if (ret < 0)
+     {
+       nerr("ERROR: ftpd_account_add failed: %d\n", ret);
+@@ -4633,13 +5031,40 @@ errout:
+ int ftpd_session(FTPD_SESSION handle, int timeout)
+ {
+   FAR struct ftpd_server_s  *server;
+-  FAR struct ftpd_session_s *session;
++  FAR struct ftpd_session_s *session = NULL;
++  union ftpd_sockaddr_u cmdaddr;
++  socklen_t cmdaddrlen = sizeof(cmdaddr);
++  int cmdsd = -1;
+   int ret;
+ 
+   DEBUGASSERT(handle);
+ 
+   server = (FAR struct ftpd_server_s *)handle;
+ 
++  /* Hold a server caller reference until either this call fails or a
++   * registered worker owns the accepted connection.  ftpd_close() waits for
++   * these references before closing and freeing the listen socket.
++   */
++
++  pthread_mutex_lock(&server->lock);
++  if (server->shutdown)
++    {
++      pthread_mutex_unlock(&server->lock);
++      return -ESHUTDOWN;
++    }
++
++  server->callers++;
++  pthread_mutex_unlock(&server->lock);
++
++  memset(&cmdaddr, 0, sizeof(cmdaddr));
++  cmdsd = ftpd_serveraccept(server, (FAR void *)&cmdaddr, &cmdaddrlen,
++                            timeout);
++  if (cmdsd < 0)
++    {
++      ret = cmdsd;
++      goto out;
++    }
++
+   /* Allocate a session */
+ 
+   session = (FAR struct ftpd_session_s *)
+@@ -4648,21 +5073,36 @@ int ftpd_session(FTPD_SESSION handle, int timeout)
+     {
+       nerr("ERROR: Failed to allocate session\n");
+       ret = -ENOMEM;
+-      goto errout;
++      goto out_with_cmd;
++    }
++
++  ret = pthread_mutex_init(&session->lock, NULL);
++  if (ret != 0)
++    {
++      nerr("ERROR: pthread_mutex_init() failed: %d\n", ret);
++      ret = -ret;
++      free(session);
++      session = NULL;
++      goto out_with_cmd;
+     }
+ 
+   /* Initialize the session */
+ 
+   session->server       = server;
+-  session->head         = server->head;
++  session->flink        = NULL;
++  session->head         = NULL;
++  session->registered   = false;
++  session->counted      = false;
++  session->shutdown     = false;
+   session->loggedin     = false;
+   session->flags        = 0;
+   session->txtimeout    = CONFIG_FTPD_CONTROL_TIMEOUT_MS;
+   session->rxtimeout    = CONFIG_FTPD_CONTROL_TIMEOUT_MS;
+   session->datatimeout  = CONFIG_FTPD_DATA_TIMEOUT_MS;
+   session->pasvtimeout  = CONFIG_FTPD_PASV_TIMEOUT_MS;
+-  session->cmd.sd       = -1;
+-  session->cmd.addrlen  = sizeof(session->cmd.addr);
++  session->cmd.sd       = cmdsd;
++  session->cmd.addr     = cmdaddr;
++  session->cmd.addrlen  = cmdaddrlen;
+   session->cmd.buflen   = CONFIG_FTPD_CMDBUFFERSIZE;
+   session->cmd.buffer   = NULL;
+   session->command      = NULL;
+@@ -4678,6 +5118,7 @@ int ftpd_session(FTPD_SESSION handle, int timeout)
+   session->home         = NULL;
+   session->work         = NULL;
+   session->renamefrom   = NULL;
++  cmdsd                 = -1;
+ 
+   /* Allocate a command buffer */
+ 
+@@ -4699,24 +5140,31 @@ int ftpd_session(FTPD_SESSION handle, int timeout)
+       goto errout_with_session;
+     }
+ 
+-  /* Accept a connection */
++  /* Give the worker a private account snapshot and publish it in the
++   * server's active-session list before creating the detached thread.
++   */
+ 
+-  session->cmd.sd = ftpd_accept(server->sd, (FAR void *)&session->cmd.addr,
+-                                &session->cmd.addrlen, timeout);
+-  if (session->cmd.sd < 0)
++  pthread_mutex_lock(&server->lock);
++  if (server->shutdown)
+     {
+-      /* Only report interesting,
+-       * infrequent errors (not the common timeout)
+-       */
+-
+-#ifdef CONFIG_DEBUG_NET
+-      if (session->cmd.sd != -ETIMEDOUT)
++      ret = -ESHUTDOWN;
++    }
++  else
++    {
++      ret = ftpd_account_clone(server->head, &session->head);
++      if (ret >= 0)
+         {
+-          nerr("ERROR: ftpd_accept() failed: %d\n", session->cmd.sd);
++          session->flink = server->sessions;
++          server->sessions = session;
++          server->workers++;
++          session->registered = true;
++          session->counted = true;
+         }
+-#endif
++    }
+ 
+-      ret = session->cmd.sd;
++  pthread_mutex_unlock(&server->lock);
++  if (ret < 0)
++    {
+       goto errout_with_session;
+     }
+ 
+@@ -4730,13 +5178,90 @@ int ftpd_session(FTPD_SESSION handle, int timeout)
+       goto errout_with_session;
+     }
+ 
+-  /* Successfully connected an launched the worker thread */
++  /* The detached worker now owns the session. */
+ 
+-  return 0;
++  session = NULL;
++  ret = OK;
++  goto out;
+ 
+ errout_with_session:
+   ftpd_freesession(session);
+-errout:
++out_with_cmd:
++  if (cmdsd >= 0)
++    {
++      close(cmdsd);
++    }
++
++out:
++  pthread_mutex_lock(&server->lock);
++  DEBUGASSERT(server->callers > 0);
++  server->callers--;
++  if (server->callers == 0)
++    {
++      pthread_cond_broadcast(&server->cond);
++    }
++
++  pthread_mutex_unlock(&server->lock);
++  return ret;
++}
++
++/****************************************************************************
++ * Name: ftpd_shutdown
++ ****************************************************************************/
++
++int ftpd_shutdown(FTPD_SESSION handle)
++{
++  FAR struct ftpd_server_s *server;
++  FAR struct ftpd_session_s *session;
++  int ret = OK;
++
++  DEBUGASSERT(handle);
++  server = (FAR struct ftpd_server_s *)handle;
++
++  pthread_mutex_lock(&server->lock);
++  if (!server->shutdown)
++    {
++      server->shutdown = true;
++
++      /* shutdown() prevents new connections immediately.  The bounded
++       * polling in ftpd_serveraccept() observes the lifecycle flag without
++       * racing close() against a descriptor currently registered in poll().
++       */
++
++      if (server->sd >= 0 && shutdown(server->sd, SHUT_RDWR) < 0 &&
++          errno != ENOTCONN)
++        {
++          ret = -errno;
++        }
++    }
++
++  /* Established control/data sockets are never closed from this thread.
++   * shutdown() wakes blocked poll/recv/send calls while leaving descriptor
++   * ownership with the worker.  Passive listeners use the same bounded
++   * lifecycle polling as the main listener.
++   */
++
++  for (session = server->sessions;
++       session != NULL;
++       session = session->flink)
++    {
++      pthread_mutex_lock(&session->lock);
++      session->shutdown = true;
++
++      if (session->cmd.sd >= 0)
++        {
++          shutdown(session->cmd.sd, SHUT_RDWR);
++        }
++
++      if (session->data.sd >= 0)
++        {
++          shutdown(session->data.sd, SHUT_RDWR);
++        }
++
++      pthread_mutex_unlock(&session->lock);
++    }
++
++  pthread_mutex_unlock(&server->lock);
+   return ret;
+ }
+ 
+@@ -4756,20 +5281,56 @@ errout:
+ 
+ void ftpd_close(FTPD_SESSION handle)
+ {
+-  struct ftpd_server_s *server;
++  FAR struct ftpd_server_s *server;
++  FAR struct ftpd_account_s *accounts;
++  int sd;
++
+   DEBUGASSERT(handle);
+ 
+-  server = (struct ftpd_server_s *)handle;
+-  if (server->head != NULL)
++  server = (FAR struct ftpd_server_s *)handle;
++  ftpd_shutdown(handle);
++
++  /* Wait until no ftpd_session() caller can be using the listener, then
++   * close it.  This avoids descriptor reuse while another thread is still
++   * tearing down poll state.
++   */
++
++  pthread_mutex_lock(&server->lock);
++  while (server->callers > 0)
+     {
+-      ftpd_account_free(server->head);
++      pthread_cond_wait(&server->cond, &server->lock);
+     }
+ 
+-  if (server->sd >= 0)
++  sd = server->sd;
++  server->sd = -1;
++  pthread_mutex_unlock(&server->lock);
++
++  if (sd >= 0)
++    {
++      close(sd);
++    }
++
++  /* A worker decrements the count only after its control and data sockets
++   * are closed, so a subsequent ftpd_open() cannot race lingering workers.
++   */
++
++  pthread_mutex_lock(&server->lock);
++  while (server->workers > 0)
++    {
++      pthread_cond_wait(&server->cond, &server->lock);
++    }
++
++  accounts = server->head;
++  server->head = NULL;
++  server->tail = NULL;
++  pthread_mutex_unlock(&server->lock);
++
++  if (accounts != NULL)
+     {
+-      close(server->sd);
+-      server->sd = -1;
++      ftpd_account_free(accounts);
+     }
+ 
++  pthread_cond_destroy(&server->cond);
++  pthread_mutex_destroy(&server->lock);
+   free(server);
+ }
+diff --git a/examples/ftpd/ftpd.h b/examples/ftpd/ftpd.h
+index 59bf11b..691e1af 100644
+--- a/examples/ftpd/ftpd.h
++++ b/examples/ftpd/ftpd.h
+@@ -33,6 +33,8 @@
+ #include <stdbool.h>
+ #include <stdlib.h>
+ 
++#include "netutils/ftpd.h"
++
+ /****************************************************************************
+  * Pre-processor Definitions
+  ****************************************************************************/
+@@ -117,15 +119,12 @@ struct fptd_account_s
+ 
+ struct ftpd_globals_s
+ {
+-  bool          initialized; /* True: Networking is initialized.  The
+-                              * network must be initialized only once.
+-                              */
+-  volatile bool stop;        /* True: Request daemon to exit */
+-  volatile bool running;     /* True: The daemon is running */
+-  pid_t         pid;         /* Task ID of the FTPD daemon.  The value
+-                              * -1 is a redundant indication that the
+-                              * daemon is not running.
+-                              */
++  bool          initialized; /* Network initialization completed */
++  bool          starting;    /* Daemon task creation is in progress */
++  bool          stop;        /* True: Request daemon to exit */
++  bool          running;     /* True: The daemon is running */
++  pid_t         pid;         /* Task ID, or -1 when inactive */
++  FTPD_SESSION  handle;      /* Published server handle, or NULL */
+ };
+ 
+ /****************************************************************************
+diff --git a/examples/ftpd/ftpd_main.c b/examples/ftpd/ftpd_main.c
+index bcc593c..1076edf 100644
+--- a/examples/ftpd/ftpd_main.c
++++ b/examples/ftpd/ftpd_main.c
+@@ -32,6 +32,7 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <sched.h>
++#include <pthread.h>
+ #include <errno.h>
+ #include <nuttx/debug.h>
+ 
+@@ -77,6 +78,9 @@ static const struct fptd_account_s g_ftpdaccounts[] =
+ 
+ struct ftpd_globals_s g_ftpdglob;
+ 
++static pthread_mutex_t g_ftpdlock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t g_ftpdcond = PTHREAD_COND_INITIALIZER;
++
+ /****************************************************************************
+  * Private Functions
+  ****************************************************************************/
+@@ -174,15 +178,30 @@ static void hint(void)
+ 
+ int ftpd_daemon(int s_argc, char **s_argv)
+ {
+-  FTPD_SESSION handle;
++  FTPD_SESSION handle = NULL;
++  pid_t pid = gettid();
++  bool stop;
+   int ret = EXIT_FAILURE;
+   int option;
+   int family = ADDR_FAMILY;
+ 
+   /* The FTPD daemon has been started */
+ 
++  pthread_mutex_lock(&g_ftpdlock);
++  g_ftpdglob.starting = false;
+   g_ftpdglob.running = true;
+-  printf("FTP daemon [%d] started\n", g_ftpdglob.pid);
++  g_ftpdglob.pid = pid;
++  stop = g_ftpdglob.stop;
++  pthread_cond_broadcast(&g_ftpdcond);
++  pthread_mutex_unlock(&g_ftpdlock);
++
++  printf("FTP daemon [%d] started\n", pid);
++
++  if (stop)
++    {
++      ret = EXIT_SUCCESS;
++      goto out;
++    }
+ 
+   while ((option = getopt(s_argc, &s_argv[1], "46")) != ERROR)
+     {
+@@ -212,31 +231,62 @@ int ftpd_daemon(int s_argc, char **s_argv)
+ 
+   if (!handle)
+     {
+-      printf("FTP daemon [%d] failed to open FTPD\n", g_ftpdglob.pid);
++      printf("FTP daemon [%d] failed to open FTPD\n", pid);
+       goto out;
+     }
+ 
++  /* Publish the handle while holding the lifecycle lock so ftpd_stop can
++   * safely request shutdown without racing handle destruction.
++   */
++
++  pthread_mutex_lock(&g_ftpdlock);
++  g_ftpdglob.handle = handle;
++  stop = g_ftpdglob.stop;
++  if (stop)
++    {
++      ftpd_shutdown(handle);
++    }
++
++  pthread_mutex_unlock(&g_ftpdlock);
++  if (stop)
++    {
++      ret = EXIT_SUCCESS;
++      goto out_with_handle;
++    }
++
+   /* Configure accounts */
+ 
+   ret = ftpd_accounts(handle);
+   if (ret < 0)
+     {
+       printf("FTP daemon [%d] failed to add account: %d\n",
+-             g_ftpdglob.pid, ret);
+-      ftpd_close(handle);
+-      goto out;
++             pid, ret);
++      goto out_with_handle;
+     }
+ 
+   /* Then drive the FTPD server. */
+ 
+-  while (g_ftpdglob.stop == 0)
++  for (; ; )
+     {
++      pthread_mutex_lock(&g_ftpdlock);
++      stop = g_ftpdglob.stop;
++      pthread_mutex_unlock(&g_ftpdlock);
++      if (stop)
++        {
++          break;
++        }
++
+       /* If ftpd_session returns success, it means that a new FTP session
+        * has been started.
+        */
+ 
+       ret = ftpd_session(handle, 5000);
+ 
++      if (ret == -ESHUTDOWN)
++        {
++          break;
++        }
++
+       /* If any interesting happened (i.e., any thing other than a timeout),
+        * then report the interesting event.
+        */
+@@ -244,20 +294,34 @@ int ftpd_daemon(int s_argc, char **s_argv)
+       if (ret != -ETIMEDOUT)
+         {
+           printf("FTP daemon [%d] ftpd_session returned %d\n",
+-                 g_ftpdglob.pid, ret);
++                 pid, ret);
+         }
+     }
+ 
+   /* Close the FTPD server and exit. */
+ 
+-  printf("FTP daemon [%d] stopping\n", g_ftpdglob.pid);
+-  ftpd_close(handle);
++  printf("FTP daemon [%d] stopping\n", pid);
+   ret = EXIT_SUCCESS;
+ 
++out_with_handle:
++  pthread_mutex_lock(&g_ftpdlock);
++  if (g_ftpdglob.handle == handle)
++    {
++      g_ftpdglob.handle = NULL;
++    }
++
++  pthread_mutex_unlock(&g_ftpdlock);
++  ftpd_close(handle);
++
+ out:
++  pthread_mutex_lock(&g_ftpdlock);
++  g_ftpdglob.handle  = NULL;
++  g_ftpdglob.starting = false;
+   g_ftpdglob.running = false;
+   g_ftpdglob.stop    = false;
+   g_ftpdglob.pid     = -1;
++  pthread_cond_broadcast(&g_ftpdcond);
++  pthread_mutex_unlock(&g_ftpdlock);
+ 
+   return ret;
+ }
+@@ -272,6 +336,10 @@ out:
+ 
+ int main(int argc, FAR char *argv[])
+ {
++  pid_t pid;
++
++  pthread_mutex_lock(&g_ftpdlock);
++
+   /* Check if we have already initialized the network */
+ 
+   if (!g_ftpdglob.initialized)
+@@ -284,34 +352,55 @@ int main(int argc, FAR char *argv[])
+       /* Initialize daemon state */
+ 
+       g_ftpdglob.initialized = true;
++      g_ftpdglob.starting    = false;
+       g_ftpdglob.pid         = -1;
+       g_ftpdglob.stop        = false;
+       g_ftpdglob.running     = false;
++      g_ftpdglob.handle      = NULL;
+     }
+ 
+   /* Then start the new daemon (if it is not already running) */
+ 
+-  if (g_ftpdglob.stop && g_ftpdglob.running)
++  if (g_ftpdglob.stop && (g_ftpdglob.starting || g_ftpdglob.running))
+     {
+       printf("Waiting for FTP daemon [%d] to stop\n", g_ftpdglob.pid);
++      pthread_mutex_unlock(&g_ftpdlock);
+       return EXIT_FAILURE;
+     }
+ 
+-  if (!g_ftpdglob.running)
++  if (!g_ftpdglob.starting && !g_ftpdglob.running)
+     {
+       printf("Starting the FTP daemon\n");
+-      g_ftpdglob.pid = task_create("FTP daemon", CONFIG_EXAMPLES_FTPD_PRIO,
+-                                   CONFIG_EXAMPLES_FTPD_STACKSIZE,
+-                                   ftpd_daemon, argv);
+-      if (g_ftpdglob.pid < 0)
++      g_ftpdglob.starting = true;
++      g_ftpdglob.stop = false;
++      pthread_mutex_unlock(&g_ftpdlock);
++
++      pid = task_create("FTP daemon", CONFIG_EXAMPLES_FTPD_PRIO,
++                        CONFIG_EXAMPLES_FTPD_STACKSIZE,
++                        ftpd_daemon, argv);
++      if (pid < 0)
+         {
+           printf("Failed to start the FTP daemon: %d\n", errno);
++          pthread_mutex_lock(&g_ftpdlock);
++          g_ftpdglob.starting = false;
++          g_ftpdglob.pid = -1;
++          pthread_cond_broadcast(&g_ftpdcond);
++          pthread_mutex_unlock(&g_ftpdlock);
+           return EXIT_FAILURE;
+         }
++
++      pthread_mutex_lock(&g_ftpdlock);
++      if (g_ftpdglob.starting)
++        {
++          g_ftpdglob.pid = pid;
++        }
++
++      pthread_mutex_unlock(&g_ftpdlock);
+     }
+   else
+     {
+       printf("FTP daemon [%d] is running\n", g_ftpdglob.pid);
++      pthread_mutex_unlock(&g_ftpdlock);
+     }
+ 
+   return EXIT_SUCCESS;
+@@ -323,13 +412,38 @@ int main(int argc, FAR char *argv[])
+ 
+ int ftpd_stop_main(int s_argc, char **s_argv)
+ {
+-  if (!g_ftpdglob.initialized || !g_ftpdglob.running)
++  pid_t pid;
++  int ret = OK;
++
++  pthread_mutex_lock(&g_ftpdlock);
++  if (!g_ftpdglob.initialized ||
++      (!g_ftpdglob.starting && !g_ftpdglob.running))
+     {
+       printf("The FTP daemon not running\n");
++      pthread_mutex_unlock(&g_ftpdlock);
+       return EXIT_FAILURE;
+     }
+ 
+-  printf("Stopping the FTP daemon, pid=%d\n", g_ftpdglob.pid);
++  pid = g_ftpdglob.pid;
++  printf("Stopping the FTP daemon, pid=%d\n", pid);
+   g_ftpdglob.stop = true;
++
++  if (g_ftpdglob.handle != NULL)
++    {
++      ret = ftpd_shutdown(g_ftpdglob.handle);
++    }
++
++  while (g_ftpdglob.starting || g_ftpdglob.running)
++    {
++      pthread_cond_wait(&g_ftpdcond, &g_ftpdlock);
++    }
++
++  pthread_mutex_unlock(&g_ftpdlock);
++  if (ret < 0)
++    {
++      printf("FTP daemon [%d] listener shutdown returned %d\n", pid, ret);
++    }
++
++  printf("FTP daemon [%d] stopped\n", pid);
+   return EXIT_SUCCESS;
+ }
+

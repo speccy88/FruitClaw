@@ -116,6 +116,13 @@
 #define BOARD_SD_SCK_PIN         34
 #define BOARD_SD_MOSI_PIN        35
 #define BOARD_SD_DETECT_PIN      33
+#define BOARD_SD_DETECT_ACTIVE_HIGH 1
+#define BOARD_SD_CLK_PIN         BOARD_SD_SCK_PIN
+#define BOARD_SD_CMD_PIN         BOARD_SD_MOSI_PIN
+#define BOARD_SD_DAT0_PIN        BOARD_SD_MISO_PIN
+#define BOARD_SD_DAT1_PIN        37
+#define BOARD_SD_DAT2_PIN        38
+#define BOARD_SD_DAT3_PIN        BOARD_SD_CS_PIN
 
 #define BOARD_NINA_SPI_BUS       1
 #define BOARD_NINA_READY_PIN     3

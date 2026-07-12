@@ -45,6 +45,16 @@ ifeq ($(CONFIG_RP23XX_I2S),y)
 CSRCS += rp23xx_fruitjam_audio.c
 endif
 
+ifeq ($(CONFIG_MMCSD),y)
+CSRCS += rp23xx_fruitjam_sdcard.c
+ifeq ($(CONFIG_RP23XX_PIO_SDIO),y)
+RP23XX_PIO_SDIO_PATH = $(TOPDIR)$(DELIM)arch$(DELIM)arm$(DELIM)src$(DELIM)rp23xx
+DEPPATH += --dep-path $(RP23XX_PIO_SDIO_PATH)
+VPATH += :$(RP23XX_PIO_SDIO_PATH)
+CSRCS += rp23xx_pio_sdio.c
+endif
+endif
+
 ifeq ($(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS),y)
 CSRCS += rp23xx_examples_romfs.c
 endif

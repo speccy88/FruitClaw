@@ -1,0 +1,32 @@
+From: NuttX RP2350 maintainers <noreply@example.com>
+Subject: [PATCH] examples/ftpd: do not log every successful session
+
+The FTP daemon writes a status line to stdout after every successful client.
+On boards where stdout is a bounded USB CDC console with no active reader,
+rapid sessions fill the console buffer and block the daemon before its next
+accept.  Treat success as the normal silent path and retain diagnostics for
+actual errors.
+
+---
+ examples/ftpd/ftpd_main.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/examples/ftpd/ftpd_main.c b/examples/ftpd/ftpd_main.c
+index 0000000..1111111 100644
+--- a/examples/ftpd/ftpd_main.c
++++ b/examples/ftpd/ftpd_main.c
+@@ -292,11 +292,11 @@ static int ftpd_daemon(int argc, FAR char *argv[])
+           break;
+         }
+ 
+-      /* If any interesting happened (i.e., any thing other than a timeout),
+-       * then report the interesting event.
++      /* Successful session startup and idle timeouts are normal.  Report
++       * unexpected errors only.
+        */
+ 
+-      if (ret != -ETIMEDOUT)
++      if (ret < 0 && ret != -ETIMEDOUT)
+         {
+           printf("FTP daemon [%d] ftpd_session returned %d\n",
+                  pid, ret);

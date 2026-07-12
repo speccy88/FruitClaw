@@ -42,6 +42,14 @@ if(CONFIG_RP23XX_I2S)
   list(APPEND SRCS rp23xx_fruitjam_audio.c)
 endif()
 
+if(CONFIG_MMCSD)
+  list(APPEND SRCS rp23xx_fruitjam_sdcard.c)
+  if(CONFIG_RP23XX_PIO_SDIO)
+    list(APPEND SRCS
+         ${NUTTX_DIR}/arch/arm/src/rp23xx/rp23xx_pio_sdio.c)
+  endif()
+endif()
+
 if(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS)
   list(APPEND SRCS rp23xx_examples_romfs.c)
 endif()

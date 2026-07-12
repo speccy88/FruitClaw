@@ -1,0 +1,34 @@
+diff --git a/system/vi/vi.c b/system/vi/vi.c
+--- a/system/vi/vi.c
++++ b/system/vi/vi.c
+@@ -673,7 +673,9 @@
+           vi->skip_lf_after_cr = false;
+         }
+ 
+-      viinfo("Returning: %c[%02x]\n", isprint(ch) ? ch : '.', ch);
++      viinfo("Returning: %c[%02x]\n",
++             ch >= 0 && ch <= UINT8_MAX &&
++             isprint((unsigned char)ch) ? ch : '.', ch);
+       return ch;
+     }
+ }
+@@ -4066,8 +4068,17 @@
+                 /* Emulate :wq */
+ 
+                 vi->cursave = vi->cursor;
+-                strlcpy(vi->scratch, "wq", sizeof(vi->scratch));
+-                vi->cmdlen = 2;
++                if (vi->modified)
++                  {
++                    strlcpy(vi->scratch, "wq", sizeof(vi->scratch));
++                    vi->cmdlen = 2;
++                  }
++                else
++                  {
++                    strlcpy(vi->scratch, "q", sizeof(vi->scratch));
++                    vi->cmdlen = 1;
++                  }
++
+                 vi_parsecolon(vi);
+ 
+                 /* If save quit succeeds, we won't return */

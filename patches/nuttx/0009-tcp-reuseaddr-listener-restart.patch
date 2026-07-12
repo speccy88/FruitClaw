@@ -1,0 +1,190 @@
+diff --git a/net/tcp/tcp.h b/net/tcp/tcp.h
+--- a/net/tcp/tcp.h
++++ b/net/tcp/tcp.h
+@@ -656,7 +656,7 @@
+ 
+ int tcp_selectport(uint8_t domain,
+                    FAR const union ip_addr_u *ipaddr,
+-                   uint16_t portno);
++                   uint16_t portno, bool reuseaddr);
+ 
+ /****************************************************************************
+  * Name: tcp_bind
+diff --git a/net/tcp/tcp_conn.c b/net/tcp/tcp_conn.c
+--- a/net/tcp/tcp_conn.c
++++ b/net/tcp/tcp_conn.c
+@@ -71,6 +71,7 @@
+ #include "icmpv6/icmpv6.h"
+ #include "nat/nat.h"
+ #include "netdev/netdev.h"
++#include "socket/socket.h"
+ #include "utils/utils.h"
+ 
+ /****************************************************************************
+@@ -113,7 +114,7 @@
+ 
+ static FAR struct tcp_conn_s *
+   tcp_listener(uint8_t domain, FAR const union ip_addr_u *ipaddr,
+-               uint16_t portno)
++               uint16_t portno, bool reuseaddr)
+ {
+   FAR struct tcp_conn_s *conn = NULL;
+ 
+@@ -121,6 +122,22 @@
+ 
+   while ((conn = tcp_nextconn(conn)) != NULL)
+     {
++#ifdef CONFIG_NET_SOCKOPTS
++      /* SO_REUSEADDR permits a new listener to share its local endpoint
++       * with accepted connections inherited from the previous listener.
++       * The listener table is still checked below, so this does not provide
++       * SO_REUSEPORT semantics or permit two live listeners.
++       */
++
++      if (reuseaddr &&
++          _SO_GETOPT(conn->sconn.s_options, SO_REUSEADDR))
++        {
++          continue;
++        }
++#else
++      UNUSED(reuseaddr);
++#endif
++
+       /* Check if this connection is open and the local port assignment
+        * matches the requested port number.
+        */
+@@ -151,6 +168,19 @@
+ }
+ 
+ /****************************************************************************
++ * Name: tcp_reuseaddr
++ ****************************************************************************/
++
++static inline bool tcp_reuseaddr(FAR struct tcp_conn_s *conn)
++{
++#ifdef CONFIG_NET_SOCKOPTS
++  return _SO_GETOPT(conn->sconn.s_options, SO_REUSEADDR);
++#else
++  return false;
++#endif
++}
++
++/****************************************************************************
+  * Name: tcp_ipv4_active
+  *
+  * Description:
+@@ -343,7 +373,7 @@
+ 
+   port = tcp_selectport(PF_INET,
+                        (FAR const union ip_addr_u *)&addr->sin_addr.s_addr,
+-                       addr->sin_port);
++                       addr->sin_port, tcp_reuseaddr(conn));
+   if (port < 0)
+     {
+       nerr("ERROR: tcp_selectport failed: %d\n", port);
+@@ -439,7 +469,7 @@
+ 
+   port = tcp_selectport(PF_INET6,
+                 (FAR const union ip_addr_u *)addr->sin6_addr.in6_u.u6_addr16,
+-                addr->sin6_port);
++                addr->sin6_port, tcp_reuseaddr(conn));
+   if (port < 0)
+     {
+       nerr("ERROR: tcp_selectport failed: %d\n", port);
+@@ -504,7 +534,7 @@
+ 
+ int tcp_selectport(uint8_t domain,
+                    FAR const union ip_addr_u *ipaddr,
+-                   uint16_t portno)
++                   uint16_t portno, bool reuseaddr)
+ {
+   static uint16_t g_last_tcp_port;
+ 
+@@ -539,7 +569,7 @@
+               return -EADDRINUSE;
+             }
+         }
+-      while (tcp_listener(domain, ipaddr, portno)
++      while (tcp_listener(domain, ipaddr, portno, reuseaddr)
+ #ifdef CONFIG_NET_NAT
+              || nat_port_inuse(domain, IP_PROTO_TCP, ipaddr, portno)
+ #endif
+@@ -551,7 +581,7 @@
+        * connection is using this local port.
+        */
+ 
+-      if (tcp_listener(domain, ipaddr, portno)
++      if (tcp_listener(domain, ipaddr, portno, reuseaddr)
+ #ifdef CONFIG_NET_NAT
+           || nat_port_inuse(domain, IP_PROTO_TCP, ipaddr, portno)
+ #endif
+@@ -1116,6 +1146,11 @@
+        */
+ 
+ #ifdef CONFIG_NET_SOCKOPTS
++      if (_SO_GETOPT(listener->sconn.s_options, SO_REUSEADDR))
++        {
++          _SO_SETOPT(conn->sconn.s_options, SO_REUSEADDR);
++        }
++
+       conn->sconn.s_rcvtimeo = listener->sconn.s_rcvtimeo;
+       conn->sconn.s_sndtimeo = listener->sconn.s_sndtimeo;
+ #  ifdef CONFIG_NET_BINDTODEVICE
+@@ -1298,7 +1333,7 @@
+ 
+           port = tcp_selectport(PF_INET,
+                                 (FAR const union ip_addr_u *)
+-                                &conn->u.ipv4.laddr, 0);
++                                &conn->u.ipv4.laddr, 0, false);
+         }
+ #endif /* CONFIG_NET_IPv4 */
+ 
+@@ -1313,7 +1348,7 @@
+ 
+           port = tcp_selectport(PF_INET6,
+                                 (FAR const union ip_addr_u *)
+-                                conn->u.ipv6.laddr, 0);
++                                conn->u.ipv6.laddr, 0, false);
+         }
+ #endif /* CONFIG_NET_IPv6 */
+ 
+diff --git a/net/inet/inet_sockif.c b/net/inet/inet_sockif.c
+--- a/net/inet/inet_sockif.c
++++ b/net/inet/inet_sockif.c
+@@ -1171,7 +1171,7 @@
+ 
+           conn->lport = tcp_selectport(PF_INET,
+                                 (FAR const union ip_addr_u *)
+-                                &conn->u.ipv4.laddr, 0);
++                                &conn->u.ipv4.laddr, 0, false);
+         }
+ #endif /* CONFIG_NET_IPv4 */
+ 
+@@ -1186,7 +1186,7 @@
+ 
+           conn->lport = tcp_selectport(PF_INET6,
+                                 (FAR const union ip_addr_u *)
+-                                conn->u.ipv6.laddr, 0);
++                                conn->u.ipv6.laddr, 0, false);
+         }
+ #endif /* CONFIG_NET_IPv6 */
+     }
+diff --git a/net/nat/nat.c b/net/nat/nat.c
+--- a/net/nat/nat.c
++++ b/net/nat/nat.c
+@@ -249,13 +249,13 @@
+ #ifndef CONFIG_NET_TCP_NO_STACK
+           /* Try to select local_port first. */
+ 
+-          int ret = tcp_selectport(domain, external_ip, local_port);
++          int ret = tcp_selectport(domain, external_ip, local_port, false);
+ 
+           /* If failed, try select another unused port. */
+ 
+           if (ret < 0)
+             {
+-              ret = tcp_selectport(domain, external_ip, 0);
++              ret = tcp_selectport(domain, external_ip, 0, false);
+             }
+ 
+           if (ret < 0)

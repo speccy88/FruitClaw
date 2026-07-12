@@ -1,0 +1,12 @@
+diff --git a/drivers/net/netdev_upperhalf.c b/drivers/net/netdev_upperhalf.c
+index 9c28fd3598..232ba9491d 100644
+--- a/drivers/net/netdev_upperhalf.c
++++ b/drivers/net/netdev_upperhalf.c
+@@ -813,7 +813,6 @@ static void netdev_upper_work(FAR void *arg)
+       upper->txrequested = false;
+       netdev_upper_txavail_work(upper);
+       netdev_upper_rxpoll_work(upper);
+-      netdev_upper_txavail_work(upper);
+     }
+   else
+     {
