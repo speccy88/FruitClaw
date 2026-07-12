@@ -1,0 +1,640 @@
+--- a/netutils/ftpd/ftpd.h
++++ b/netutils/ftpd/ftpd.h
+@@ -152,6 +152,7 @@
+   /* Data */
+ 
+   struct ftpd_stream_s       data;
++  bool                       dataaccepted; /* data.sd is not a listener */
+   off_t                      restartpos;
+ 
+   /* File */
+--- a/netutils/ftpd/ftpd.c
++++ b/netutils/ftpd/ftpd.c
+@@ -44,6 +44,7 @@
+ 
+ #include <sys/socket.h>
+ #include <sys/stat.h>
++#include <sys/time.h>
+ 
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -82,6 +83,7 @@
+ 
+ #define FTPD_SHUTDOWN_POLL_INTERVAL_MS 250
+ #define FTPD_ACCEPT_RETRY_DELAY_MS      10
++#define FTPD_ACCEPT_BLOCK_TIMEOUT_MS    200
+ 
+ /****************************************************************************
+  * Private Function Prototypes
+@@ -128,6 +130,9 @@
+ static int ftpd_dataaccept(FAR struct ftpd_session_s *session, int sd,
+                            FAR void *addr, FAR socklen_t *addrlen,
+                            int timeout);
++static bool ftpd_datapending(FAR struct ftpd_session_s *session);
++static int ftpd_datapreaccept(FAR struct ftpd_session_s *session,
++                              int listensd);
+ static int ftpd_connect(int sd, FAR const struct sockaddr *addr,
+                         socklen_t addrlen, int timeout);
+ static ssize_t ftpd_recv(FAR struct ftpd_session_s *session, int sd,
+@@ -935,15 +940,104 @@
+ }
+ 
+ /****************************************************************************
++ * Name: ftpd_datapending
++ ****************************************************************************/
++
++static bool ftpd_datapending(FAR struct ftpd_session_s *session)
++{
++  bool pending;
++
++  pthread_mutex_lock(&session->lock);
++  pending = !session->shutdown && session->data.sd >= 0 &&
++            !session->dataaccepted;
++  pthread_mutex_unlock(&session->lock);
++  return pending;
++}
++
++/****************************************************************************
++ * Name: ftpd_datapreaccept
++ ****************************************************************************/
++
++static int ftpd_datapreaccept(FAR struct ftpd_session_s *session,
++                              int listensd)
++{
++  union ftpd_sockaddr_u addr;
++  socklen_t addrlen = sizeof(addr);
++#ifdef CONFIG_NET_SOLINGER
++  struct linger ling;
++#endif
++  bool accepted = false;
++  int acceptsd = -1;
++  int ret;
++
++  pthread_mutex_lock(&session->lock);
++  if (session->shutdown)
++    {
++      ret = -ESHUTDOWN;
++    }
++  else if (session->data.sd != listensd || session->dataaccepted)
++    {
++      ret = OK;
++    }
++  else
++    {
++      acceptsd = accept4(listensd, (FAR struct sockaddr *)&addr,
++                         &addrlen, SOCK_CLOEXEC);
++      if (acceptsd < 0)
++        {
++          ret = -errno;
++        }
++      else if (!ftpd_datahost_matches(session, &addr))
++        {
++          ret = -EPERM;
++        }
++      else
++        {
++          session->data.sd       = acceptsd;
++          session->data.addr     = addr;
++          session->data.addrlen  = addrlen;
++          session->dataaccepted  = true;
++          accepted               = true;
++          ret = OK;
++        }
++    }
++
++  pthread_mutex_unlock(&session->lock);
++  if (!accepted)
++    {
++      if (acceptsd >= 0)
++        {
++          close(acceptsd);
++        }
++
++      return ret;
++    }
++
++  close(listensd);
++
++#ifdef CONFIG_NET_SOLINGER
++  memset(&ling, 0, sizeof(ling));
++  ling.l_onoff  = 1;
++  ling.l_linger = 4;
++  setsockopt(acceptsd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
++#endif
++
++  return OK;
++}
++
++/****************************************************************************
+  * Name: ftpd_rxpoll
+  ****************************************************************************/
+ 
+ static int ftpd_rxpoll(FAR struct ftpd_session_s *session, int sd,
+                        int timeout)
+ {
+-  struct pollfd fds[1];
++  struct pollfd fds[2];
+   int interval = CONFIG_FTPD_POLL_INTERVAL_MS;
+   int64_t deadline;
++  nfds_t nfds;
++  int acceptret;
++  int datafd;
+   int remaining;
+   int slice;
+   int ret;
+@@ -965,12 +1059,6 @@
+       return ret;
+     }
+ 
+-  /* Set up the poll */
+-
+-  fds[0].fd      = sd;
+-  fds[0].events  = POLLIN;
+-  fds[0].revents = 0;
+-
+   /* Perform the poll in short slices so board-specific transports can make
+    * progress while the FTP worker waits for socket readiness.
+    */
+@@ -994,10 +1082,29 @@
+       else
+         {
+           slice = remaining;
++        }
++
++      nfds           = 1;
++      datafd         = -1;
++      fds[0].fd      = sd;
++      fds[0].events  = POLLIN;
++      fds[0].revents = 0;
++
++      pthread_mutex_lock(&session->lock);
++      if (sd == session->cmd.sd && session->data.sd >= 0 &&
++          !session->dataaccepted)
++        {
++          datafd         = session->data.sd;
++          fds[1].fd      = datafd;
++          fds[1].events  = POLLIN;
++          fds[1].revents = 0;
++          nfds           = 2;
+         }
+ 
++      pthread_mutex_unlock(&session->lock);
++
+       ftpd_activity_hook("rxpoll-wait");
+-      ret = poll(fds, 1, slice);
++      ret = poll(fds, nfds, slice);
+       if (ret < 0 && (errno == EBUSY || errno == EAGAIN))
+         {
+           if (ftpd_isshutdown(session))
+@@ -1012,6 +1119,39 @@
+             }
+ 
+           continue;
++        }
++
++      if (ret > 0 && nfds == 2 && fds[1].revents != 0)
++        {
++          acceptret = ftpd_datapreaccept(session, datafd);
++          if (acceptret == -ESHUTDOWN)
++            {
++              return acceptret;
++            }
++          else if (acceptret < 0 &&
++                   acceptret != -EINTR && acceptret != -EAGAIN &&
++                   acceptret != -EWOULDBLOCK &&
++                   acceptret != -ECONNABORTED &&
++                   acceptret != -ECONNRESET &&
++                   acceptret != -ENOTCONN && acceptret != -EPROTO &&
++                   acceptret != -EPERM)
++            {
++              ftpd_dataclose(session);
++            }
++
++          if (fds[0].revents == 0)
++            {
++              if (acceptret < 0)
++                {
++                  acceptret = ftpd_retry_wait(timeout, deadline);
++                  if (acceptret < 0)
++                    {
++                      return acceptret;
++                    }
++                }
++
++              continue;
++            }
+         }
+ 
+       if (ret != 0 || timeout == 0 || interval <= 0)
+@@ -1309,34 +1449,154 @@
+                            FAR void *addr, FAR socklen_t *addrlen,
+                            int timeout)
+ {
++  struct timeval accepttimeout;
++  struct timeval notimeout;
++  struct timespec now;
+   int64_t deadline;
++  int64_t remaining;
+   int acceptsd;
++  int blocktimeout;
++  int flags;
+   int ret;
+ 
+   ret = ftpd_retry_deadline(timeout, &deadline);
+   if (ret < 0)
+     {
+       return ret;
++    }
++
++  if (timeout == 0)
++    {
++      pthread_mutex_lock(&session->lock);
++      if (session->shutdown || session->data.sd != sd ||
++          session->dataaccepted)
++        {
++          pthread_mutex_unlock(&session->lock);
++          return -ESHUTDOWN;
++        }
++
++      pthread_mutex_unlock(&session->lock);
++      acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen,
++                         SOCK_CLOEXEC);
++      if (acceptsd < 0 &&
++          (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK ||
++           errno == ECONNABORTED || errno == ECONNRESET ||
++           errno == ENOTCONN || errno == EPROTO))
++        {
++          return -ETIMEDOUT;
++        }
++
++      if (acceptsd >= 0)
++        {
++          pthread_mutex_lock(&session->lock);
++          if (session->shutdown || session->data.sd != sd ||
++              session->dataaccepted)
++            {
++              pthread_mutex_unlock(&session->lock);
++              close(acceptsd);
++              return -ESHUTDOWN;
++            }
++
++          pthread_mutex_unlock(&session->lock);
++        }
++
++      return acceptsd < 0 ? -errno : acceptsd;
+     }
+ 
++  flags = fcntl(sd, F_GETFL, 0);
++  if (flags < 0)
++    {
++      return -errno;
++    }
++
++  if (fcntl(sd, F_SETFL, flags & ~O_NONBLOCK) < 0)
++    {
++      return -errno;
++    }
++
+   for (; ; )
+     {
+       pthread_mutex_lock(&session->lock);
+-      if (session->shutdown)
++      if (session->shutdown || session->data.sd != sd ||
++          session->dataaccepted)
+         {
+           pthread_mutex_unlock(&session->lock);
+           return -ESHUTDOWN;
++        }
++
++      pthread_mutex_unlock(&session->lock);
++
++      blocktimeout = FTPD_ACCEPT_BLOCK_TIMEOUT_MS;
++      if (timeout > 0)
++        {
++          if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
++            {
++              return -errno;
++            }
++
++          remaining = deadline -
++                      ((int64_t)now.tv_sec * 1000 +
++                       now.tv_nsec / 1000000);
++          if (remaining <= 0)
++            {
++              return -ETIMEDOUT;
++            }
++
++          if (remaining < blocktimeout)
++            {
++              blocktimeout = (int)remaining;
++            }
+         }
+ 
++      accepttimeout.tv_sec  = blocktimeout / 1000;
++      accepttimeout.tv_usec = (blocktimeout % 1000) * 1000;
++      if (setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, &accepttimeout,
++                     sizeof(accepttimeout)) < 0)
++        {
++          return -errno;
++        }
++
+       acceptsd = accept4(sd, (FAR struct sockaddr *)addr, addrlen,
+                          SOCK_CLOEXEC);
+       ret = acceptsd < 0 ? -errno : acceptsd;
++
++      pthread_mutex_lock(&session->lock);
++      if (session->shutdown || session->data.sd != sd ||
++          session->dataaccepted)
++        {
++          pthread_mutex_unlock(&session->lock);
++          if (acceptsd >= 0)
++            {
++              close(acceptsd);
++            }
++
++          return -ESHUTDOWN;
++        }
++
+       pthread_mutex_unlock(&session->lock);
+ 
++      if (ret == -ETIMEDOUT)
++        {
++          /* Re-register the blocking accept callback immediately.  Sleeping
++           * here creates an avoidable gap in which a tiny peer can finish
++           * and close before the next accept begins.  The top of the loop
++           * recomputes and enforces the outer deadline.
++           */
++
++          continue;
++        }
++
+       if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK ||
+           ret == -ECONNABORTED || ret == -ECONNRESET ||
+           ret == -ENOTCONN || ret == -EPROTO)
+         {
++          /* A blocking accept registers the listener callback atomically
++           * with the backlog check, so a tiny client cannot connect, send,
++           * and close between non-blocking poll/accept retries.  The receive
++           * timeout bounds each lifecycle/shutdown observation slice while
++           * ftpd_retry_wait enforces the existing outer PASV deadline.
++           */
++
+           ret = ftpd_retry_wait(timeout, deadline);
+           if (ret < 0)
+             {
+@@ -1346,7 +1606,21 @@
+           continue;
+         }
+ 
+-      return ret;
++      if (ret < 0)
++        {
++          return ret;
++        }
++
++      memset(&notimeout, 0, sizeof(notimeout));
++      if (setsockopt(acceptsd, SOL_SOCKET, SO_RCVTIMEO, &notimeout,
++                     sizeof(notimeout)) < 0)
++        {
++          ret = -errno;
++          close(acceptsd);
++          return ret;
++        }
++
++      return acceptsd;
+     }
+ }
+ 
+@@ -1558,6 +1832,7 @@
+   else
+     {
+       session->data.sd = sd;
++      session->dataaccepted = false;
+     }
+ 
+   pthread_mutex_unlock(&session->lock);
+@@ -1594,11 +1869,35 @@
+ static int ftpd_dataopen(FAR struct ftpd_session_s *session)
+ {
+   socklen_t addrlen;
++  bool connected;
+   int listensd;
+   int sd;
+   int ret;
+ 
+-  if (session->data.sd < 0)
++  pthread_mutex_lock(&session->lock);
++  connected = session->dataaccepted;
++  sd        = session->data.sd;
++  pthread_mutex_unlock(&session->lock);
++  if (connected)
++    {
++      if (sd < 0)
++        {
++          return -EBADF;
++        }
++
++      if (!ftpd_datahost_matches(session, &session->data.addr))
++        {
++          ftpd_response(session->cmd.sd, session->txtimeout,
++                        g_respfmt1, 425, ' ',
++                        "Data peer must match control peer");
++          ftpd_dataclose(session);
++          return -EPERM;
++        }
++
++      return OK;
++    }
++
++  if (sd < 0)
+     {
+       /* PORT session */
+ 
+@@ -1705,6 +2004,7 @@
+   else
+     {
+       session->data.sd = sd;
++      session->dataaccepted = true;
+       ret = OK;
+     }
+ 
+@@ -1753,6 +2053,7 @@
+   pthread_mutex_lock(&session->lock);
+   sd = session->data.sd;
+   session->data.sd = -1;
++  session->dataaccepted = false;
+   pthread_mutex_unlock(&session->lock);
+ 
+   if (sd >= 0)
+@@ -2455,6 +2756,7 @@
+   FAR char *abspath;
+   FAR char *path;
+   bool isnew;
++  bool preliminary = false;
+   bool transfer_failed = false;
+   int oflags;
+   FAR char *buffer;
+@@ -2486,9 +2788,34 @@
+ 
+   path = abspath;
+ 
++  /* Some command-first clients, including FileZilla, wait for the
++   * preliminary reply before opening a passive upload connection.  Reply
++   * before the bounded passive accept for STOR/APPE, while preserving the
++   * existing active-mode and download ordering.
++   */
++
++  if (ftpd_datapending(session))
++    {
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 150, ' ', "Opening data connection");
++      if (ret < 0)
++        {
++          nerr("ERROR: ftpd_response failed: %d\n", ret);
++          ftpd_dataclose(session);
++          goto errout_with_path;
++        }
++
++      preliminary = true;
++    }
++
+   ret = ftpd_dataopen(session);
+   if (ret < 0)
+     {
++      if (preliminary && ret != -ESHUTDOWN)
++        {
++          ret = OK;
++        }
++
+       goto errout_with_path;
+     }
+ 
+@@ -2604,13 +2931,17 @@
+ 
+   /* Send success message */
+ 
+-  ret = ftpd_response(session->cmd.sd, session->txtimeout,
+-                      g_respfmt1, 150, ' ', "Opening data connection");
+-  if (ret < 0)
++  if (!preliminary)
+     {
+-      nerr("ERROR: ftpd_response failed: %d\n", ret);
+-      transfer_failed = true;
+-      goto errout_with_session;
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 150, ' ',
++                          "Opening data connection");
++      if (ret < 0)
++        {
++          nerr("ERROR: ftpd_response failed: %d\n", ret);
++          transfer_failed = true;
++          goto errout_with_session;
++        }
+     }
+ 
+   for (; ; )
+@@ -4096,21 +4427,39 @@
+ static int ftpd_command_list(FAR struct ftpd_session_s *session)
+ {
+   uint8_t option = FTPD_LISTOPTION_L;
++  bool preliminary = false;
+   int ret;
++
++  if (ftpd_datapending(session))
++    {
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 150, ' ',
++                          "Opening ASCII mode data connection for file list");
++      if (ret < 0)
++        {
++          ftpd_dataclose(session);
++          return ret;
++        }
+ 
++      preliminary = true;
++    }
++
+   ret = ftpd_dataopen(session);
+   if (ret < 0)
+     {
+       return 0;
+     }
+ 
+-  ret = ftpd_response(session->cmd.sd, session->txtimeout,
+-                      g_respfmt1, 150, ' ',
+-                      "Opening ASCII mode data connection for file list");
+-  if (ret < 0)
++  if (!preliminary)
+     {
+-      ftpd_dataclose(session);
+-      return ret;
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 150, ' ',
++                          "Opening ASCII mode data connection for file list");
++      if (ret < 0)
++        {
++          ftpd_dataclose(session);
++          return ret;
++        }
+     }
+ 
+   option |= ftpd_listoption((char **)(&session->param));
+@@ -4137,7 +4486,22 @@
+ static int ftpd_command_nlst(FAR struct ftpd_session_s *session)
+ {
+   uint8_t option = 0;
++  bool preliminary = false;
+   int ret;
++
++  if (ftpd_datapending(session))
++    {
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 150, ' ',
++                          "Opening ASCII mode data connection for file list");
++      if (ret < 0)
++        {
++          ftpd_dataclose(session);
++          return ret;
++        }
++
++      preliminary = true;
++    }
+ 
+   ret = ftpd_dataopen(session);
+   if (ret < 0)
+@@ -4145,13 +4509,16 @@
+       return 0;
+     }
+ 
+-  ret = ftpd_response(session->cmd.sd, session->txtimeout,
+-                      g_respfmt1, 150, ' ',
+-                      "Opening ASCII mode data connection for file list");
+-  if (ret < 0)
++  if (!preliminary)
+     {
+-      ftpd_dataclose(session);
+-      return ret;
++      ret = ftpd_response(session->cmd.sd, session->txtimeout,
++                          g_respfmt1, 150, ' ',
++                          "Opening ASCII mode data connection for file list");
++      if (ret < 0)
++        {
++          ftpd_dataclose(session);
++          return ret;
++        }
+     }
+ 
+   option |= ftpd_listoption((char **)(&session->param));
+@@ -5245,8 +5612,9 @@
+   session->cmd.buffer   = NULL;
+   session->command      = NULL;
+   session->param        = NULL;
+-  session->data.sd      = -1;
+-  session->data.addrlen = sizeof(session->data.addr);
++  session->data.sd        = -1;
++  session->dataaccepted   = false;
++  session->data.addrlen   = sizeof(session->data.addr);
+   session->data.buflen  = CONFIG_FTPD_DATABUFFERSIZE;
+   session->data.buffer  = NULL;
+   session->restartpos   = 0;
+

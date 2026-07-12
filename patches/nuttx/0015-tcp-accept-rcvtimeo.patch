@@ -1,0 +1,13 @@
+diff --git a/net/tcp/tcp_accept.c b/net/tcp/tcp_accept.c
+--- a/net/tcp/tcp_accept.c
++++ b/net/tcp/tcp_accept.c
+@@ -275,7 +275,8 @@ int psock_tcp_accept(FAR struct socket *psock, FAR struct sockaddr *addr,
+        * conn_dev_sem_timedwait will also terminate if a signal is received.
+        */
+ 
+-      ret = conn_dev_sem_timedwait(&state.acpt_sem, true, UINT_MAX,
++      ret = conn_dev_sem_timedwait(&state.acpt_sem, true,
++                                   _SO_TIMEOUT(conn->sconn.s_rcvtimeo),
+                                    &conn->sconn, NULL);
+ 
+       /* Make sure that no further events are processed */

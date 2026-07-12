@@ -188,10 +188,97 @@ def ftp_connect(args: argparse.Namespace) -> ftplib.FTP:
     return ftp
 
 
+def ftp_passive_endpoint(ftp: ftplib.FTP, command: str) -> tuple[str, int]:
+    if ftp.sock is None:
+        raise AuditFailure("FTP control socket is not connected")
+
+    peer = ftp.sock.getpeername()
+    if command == "PASV":
+        _, port = ftplib.parse227(ftp.sendcmd("PASV"))
+        return peer[0], port
+    if command == "EPSV":
+        return ftplib.parse229(ftp.sendcmd("EPSV"), peer)
+    raise AuditFailure(f"unsupported passive command: {command}")
+
+
+def ftp_early_close_store(
+    ftp: ftplib.FTP,
+    command: str,
+    remote_name: str,
+    payload: bytes,
+    ordering: str,
+    command_first_delay: float,
+) -> None:
+    ftp.voidcmd("TYPE I")
+    host, port = ftp_passive_endpoint(ftp, command)
+    preliminary: str | None = None
+    if ordering == "connect-first":
+        data = socket.create_connection(
+            (host, port), ftp.timeout, source_address=ftp.source_address
+        )
+        try:
+            # Hold the connected socket idle long enough for the FTP worker
+            # to preaccept it while waiting for the transfer command.
+
+            time.sleep(1.0)
+            ftp.putcmd("STOR " + remote_name)
+        except Exception:
+            data.close()
+            raise
+    elif ordering == "command-first-close":
+        ftp.putcmd("STOR " + remote_name)
+
+        # FileZilla sends STOR before opening its data socket.  Give the
+        # worker time to enter its bounded listener poll, then finish and
+        # close the tiny transfer before reading the preliminary 150.
+
+        time.sleep(command_first_delay)
+        data = socket.create_connection(
+            (host, port), ftp.timeout, source_address=ftp.source_address
+        )
+    elif ordering == "command-first-150":
+        ftp.putcmd("STOR " + remote_name)
+        preliminary = ftp.getresp()
+        if not preliminary.startswith("150"):
+            raise AuditFailure(
+                f"{command} STOR returned {preliminary!r}, expected 150"
+            )
+        data = socket.create_connection(
+            (host, port), ftp.timeout, source_address=ftp.source_address
+        )
+    else:
+        raise AuditFailure(f"unsupported early-close ordering: {ordering}")
+    try:
+        data.sendall(payload)
+    finally:
+        data.close()
+
+    if preliminary is None:
+        preliminary = ftp.getresp()
+    if not preliminary.startswith("150"):
+        raise AuditFailure(
+            f"{command} early-close STOR returned {preliminary!r}, expected 150"
+        )
+    complete = ftp.voidresp()
+    if not complete.startswith("226"):
+        raise AuditFailure(
+            f"{command} early-close STOR returned {complete!r}, expected 226"
+        )
+
+
 def audit_ftp(args: argparse.Namespace, payload: bytes, remote_name: str) -> list[Result]:
     results: list[Result] = []
     ftp = ftp_connect(args)
-    cleanup = {remote_name, remote_name + ".active", remote_name + ".append"}
+    gui_names = {
+        "PASV": remote_name + ".gui-pasv",
+        "EPSV": remote_name + ".gui-epsv",
+    }
+    cleanup = {
+        remote_name,
+        remote_name + ".active",
+        remote_name + ".append",
+        *gui_names.values(),
+    }
     try:
         if ftp.pwd() != "/":
             raise AuditFailure(f"unexpected FTP root: {ftp.pwd()}")
@@ -215,6 +302,17 @@ def audit_ftp(args: argparse.Namespace, payload: bytes, remote_name: str) -> lis
 
         results.append(timed("ftp second control session", second_control))
 
+        def directory_listing() -> str:
+            entries: list[str] = []
+            response = ftp.retrlines("LIST", entries.append)
+            if not response.startswith("226"):
+                raise AuditFailure(
+                    f"FTP LIST returned {response!r}, expected 226"
+                )
+            return f"entries={len(entries)}"
+
+        results.append(timed("ftp directory listing", directory_listing))
+
         def passive_roundtrip() -> str:
             ftp.set_pasv(True)
             ftp.storbinary("STOR " + remote_name, io.BytesIO(payload))
@@ -227,6 +325,54 @@ def audit_ftp(args: argparse.Namespace, payload: bytes, remote_name: str) -> lis
             return f"bytes={len(received)} sha256={hashlib.sha256(received).hexdigest()}"
 
         results.append(timed("ftp passive SD roundtrip", passive_roundtrip))
+
+        def gui_style_tiny_uploads() -> str:
+            for command, name in gui_names.items():
+                for iteration in range(25):
+                    ordering = (
+                        "connect-first",
+                        "command-first-close",
+                        "command-first-150",
+                    )[iteration % 3]
+                    command_first_delay = (
+                        5.0 if (iteration // 3) % 2 == 0 else 1.0
+                    )
+                    prefix = f"{command}-{iteration:02d}:".encode()
+                    tiny_payload = (prefix + payload)[:552]
+                    if len(tiny_payload) != 552:
+                        raise AuditFailure("GUI-style payload is not 552 bytes")
+
+                    try:
+                        ftp_early_close_store(
+                            ftp,
+                            command,
+                            name,
+                            tiny_payload,
+                            ordering,
+                            command_first_delay,
+                        )
+                    except ftplib.all_errors as error:
+                        raise AuditFailure(
+                            f"{command} {ordering} early-close iteration "
+                            f"{iteration} failed: {error}"
+                        ) from error
+                    received = bytearray()
+                    ftp.retrbinary("RETR " + name, received.extend)
+                    if bytes(received) != tiny_payload:
+                        raise AuditFailure(
+                            f"{command} early-close mismatch at iteration "
+                            f"{iteration}: expected={len(tiny_payload)} "
+                            f"actual={len(received)}"
+                        )
+                    ftp.delete(name)
+
+            return (
+                "PASV=25 EPSV=25 bytes=552, connect-first, 1s/5s "
+                "close-before-150, and wait-for-150 orderings; every RETR "
+                "matched"
+            )
+
+        results.append(timed("ftp GUI-style tiny uploads", gui_style_tiny_uploads))
 
         def append_and_resume() -> str:
             first = payload[:4096]
@@ -587,39 +733,105 @@ def audit_telnet(args: argparse.Namespace) -> list[Result]:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 counts = list(executor.map(rapid_commands, enumerate(clients, 1)))
 
-            stopped = telnet_command(clients[0], b"ftpd_stop", args.timeout * 2)
-            if b"stopped" not in stopped.lower():
-                raise AuditFailure(f"ftpd_stop did not confirm shutdown: {stopped[-200:]!r}")
-            try:
-                stale = socket.create_connection(
-                    (args.host, args.ftp_port), min(args.timeout, 1.0)
-                )
-            except OSError:
-                pass
-            else:
-                stale.close()
-                raise AuditFailure("FTP port still accepted a connection after ftpd_stop")
-
-            started = telnet_command(clients[0], b"ftpd_start -4", args.timeout)
-            if b"Starting the FTP daemon" not in started:
-                raise AuditFailure(f"ftpd_start did not start cleanly: {started[-200:]!r}")
-
-            deadline = time.monotonic() + args.timeout
-            while True:
+            def require_closed(endpoint: tuple[str, int], label: str) -> None:
                 try:
-                    restarted = ftp_connect(args)
-                    restarted.quit()
-                    break
-                except ftplib.all_errors:
-                    if time.monotonic() >= deadline:
-                        raise AuditFailure("FTP did not accept login after restart")
-                    time.sleep(0.1)
+                    stale = socket.create_connection(
+                        endpoint, min(args.timeout, 1.0)
+                    )
+                except OSError:
+                    return
+                stale.close()
+                raise AuditFailure(f"{label} still accepted a connection")
+
+            def stop_ftp() -> None:
+                stopped = telnet_command(
+                    clients[0], b"ftpd_stop", args.timeout * 2
+                )
+                if b"stopped" not in stopped.lower():
+                    raise AuditFailure(
+                        f"ftpd_stop did not confirm shutdown: {stopped[-200:]!r}"
+                    )
+
+            def start_ftp() -> None:
+                started = telnet_command(
+                    clients[0], b"ftpd_start -4", args.timeout
+                )
+                if (
+                    b"Starting the FTP daemon" not in started
+                    and b"is running" not in started
+                ):
+                    raise AuditFailure(
+                        f"ftpd_start did not start cleanly: {started[-200:]!r}"
+                    )
+
+                deadline = time.monotonic() + args.timeout
+                while True:
+                    try:
+                        restarted = ftp_connect(args)
+                        restarted.quit()
+                        return
+                    except ftplib.all_errors:
+                        if time.monotonic() >= deadline:
+                            raise AuditFailure(
+                                "FTP did not accept login after restart"
+                            )
+                        time.sleep(0.1)
+
+            pending = ftp_connect(args)
+            pending_endpoint = ftp_passive_endpoint(pending, "PASV")
+            try:
+                stop_ftp()
+                require_closed(
+                    (args.host, args.ftp_port), "FTP control port after stop"
+                )
+                require_closed(
+                    pending_endpoint, "unconnected PASV listener after stop"
+                )
+            finally:
+                pending.close()
+                start_ftp()
+
+            idle = ftp_connect(args)
+            idle_endpoint = ftp_passive_endpoint(idle, "EPSV")
+            idle_data = socket.create_connection(idle_endpoint, args.timeout)
+            try:
+                time.sleep(0.5)
+                response = idle.sendcmd("NOOP")
+                if not response.startswith("200"):
+                    raise AuditFailure(
+                        f"NOOP with preaccepted idle data failed: {response}"
+                    )
+
+                stop_ftp()
+                idle_data.settimeout(min(args.timeout, 1.0))
+                try:
+                    residual = idle_data.recv(1)
+                except socket.timeout as error:
+                    raise AuditFailure(
+                        "preaccepted idle data socket survived ftpd_stop"
+                    ) from error
+                except OSError:
+                    pass
+                else:
+                    if residual:
+                        raise AuditFailure(
+                            "preaccepted idle data socket returned unexpected data"
+                        )
+
+                require_closed(
+                    (args.host, args.ftp_port), "FTP control port after stop"
+                )
+            finally:
+                idle_data.close()
+                idle.close()
+                start_ftp()
         finally:
             for client in clients:
                 client.sock.close()
         return (
             f"two shells, {sum(counts)} rapid commands, "
-            f"SD={block_size * blocks} bytes, FTP restart passed"
+            f"SD={block_size * blocks} bytes, FTP listener and "
+            "preaccepted shutdown passed"
         )
 
     return [timed("telnet concurrent shells", simultaneous_shells)]
