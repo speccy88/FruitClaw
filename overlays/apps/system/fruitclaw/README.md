@@ -152,11 +152,11 @@ supports it, then writes `secrets/telegram_token` or
 whitespace and common serial-shell `\n` / `\r` suffixes when reading these
 one-line secret files.
 
-The current USB CDC console is configured for default `tio` use:
-`CONFIG_NSH_DISABLE_ECHOBACK` is unset and
-`CONFIG_READLINE_FORCE_ECHO=y`, so NSH commands are echoed once even though the
-CDC driver echo flag is off.  FruitClaw's own prompt reader accepts both CR and
-LF, so interactive commands such as `fruitclaw config set-wifi` work when a
+The current USB CDC console is configured for default `tio` use.  The terminal
+stays canonical and echo-enabled for applications; NSH readline temporarily
+disables driver echo while it owns command-line editing and restores the saved
+mode before launching a command.  FruitClaw's own prompt reader accepts both CR
+and LF, so interactive commands such as `fruitclaw config set-wifi` work when a
 terminal sends carriage return.
 
 For unattended provisioning over CDC serial, the same commands also accept a
@@ -269,11 +269,10 @@ start, stop, restart, enable, and disable through the compiled `ftpd_start` and
 file before FruitClaw starts it again.
 
 Telnet NSH is intended to feel like serial NSH.  The Telnet driver requests
-Suppress Go Ahead and advertises server-side ECHO when termios `ECHO` is set,
-because FruitClaw builds with `CONFIG_READLINE_FORCE_ECHO=y` and readline is
-the component that echoes interactive input.  When a password prompt or other
-tool clears `ECHO`, the driver sends `WONT ECHO` so clients stop showing
-hidden input.
+Suppress Go Ahead and keeps the client in remote-echo mode.  Readline mirrors
+the terminal's saved `ECHO` setting while it owns interactive input.  Password
+prompts can therefore suppress output without inviting the client to echo the
+hidden value locally.
 
 Schedules:
 

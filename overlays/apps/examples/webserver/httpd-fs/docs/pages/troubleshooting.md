@@ -82,11 +82,11 @@ apps such as `cgol` stay in the foreground until Ctrl-C.
 
 ## USB Console Echo
 
-The current profile keeps NSH echoback enabled, so a default serial program
-such as `tio /dev/cu.usbmodem01` should show what you type and Enter should
-advance cleanly to the next prompt. If an older alpha image shows repeated
-`nsh>` prompts on one line or hides typed characters, rebuild with
-`CONFIG_NSH_DISABLE_ECHOBACK` unset and `CONFIG_READLINE_FORCE_ECHO=y`.
+The current profile keeps the CDC terminal canonical and echo-enabled between
+NSH reads, so a default serial program such as `tio /dev/cu.usbmodem01` should
+show what you type and Enter should advance cleanly to the next prompt. NSH
+readline temporarily disables driver echo while it edits a command, then
+restores the saved terminal mode before launching the command.
 
 FruitClaw's prompt-based setup commands use their own CR/LF-aware reader. If
 `fruitclaw config set-wifi` prints `ssid:` or `password:` but Enter does not

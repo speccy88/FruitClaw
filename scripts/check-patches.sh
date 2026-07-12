@@ -114,7 +114,7 @@ nr_apply_series apps "$WORK/apps" "$ROOT/patches/apps"
 # discovering the wrapper repository and skipping paths under ignored build/.
 grep -R -q '^[[:space:]]*config RP23XX_PSRAM$' "$WORK/nuttx/arch/arm/src/rp23xx" || \
   nr_die "NuttX patch marker missing after application"
-grep -R -q '^[[:space:]]*config READLINE_FORCE_ECHO$' "$WORK/apps/system/readline" || \
+grep -R -q '^[[:space:]]*config NSH_USBCONSOLE_WAIT_DTR$' "$WORK/apps/nshlib" || \
   nr_die "apps patch marker missing after application"
 
 nr_copy_overlay NuttX "$ROOT/overlays/nuttx" "$WORK/nuttx"

@@ -164,7 +164,7 @@ index 74f8a4795..8c05d83c9 100644
  /****************************************************************************
   * Private Functions
   ****************************************************************************/
-@@ -70,6 +82,114 @@ static void nsh_configstdio(int fd)
+@@ -70,6 +82,115 @@ static void nsh_configstdio(int fd)
    dup2(fd, 2);
  }
  
@@ -196,9 +196,10 @@ index 74f8a4795..8c05d83c9 100644
 +
 +  if (tcgetattr(fd, &cfg) == 0)
 +    {
-+      cfg.c_iflag = 0;
-+      cfg.c_oflag = OPOST | ONLCR;
-+      cfg.c_lflag = ISIG;
++      cfg.c_iflag &= ~(INLCR | IGNCR);
++      cfg.c_iflag |= ICRNL;
++      cfg.c_oflag |= OPOST | ONLCR;
++      cfg.c_lflag |= ISIG | ICANON | ECHO;
 +      cfg.c_cc[VMIN] = 1;
 +      cfg.c_cc[VTIME] = 0;
 +
@@ -353,26 +354,6 @@ index 74f8a4795..8c05d83c9 100644
      }
  }
  
-diff --git a/system/readline/Kconfig b/system/readline/Kconfig
-index f088fddee..ea8d33488 100644
---- a/system/readline/Kconfig
-+++ b/system/readline/Kconfig
-@@ -26,6 +26,15 @@ config READLINE_ECHO
- 
- if READLINE_ECHO
- 
-+config READLINE_FORCE_ECHO
-+	bool "Force readline echo independent of termios ECHO"
-+	default n
-+	---help---
-+		Always echo characters from readline even when the input terminal's
-+		ECHO flag is not set. This is useful for USB CDC consoles whose line
-+		discipline starts with driver echo disabled, but where the shell
-+		should still provide a visible interactive command line.
-+
- config READLINE_TABCOMPLETION
- 	bool "Tab completion"
- 	default n
 diff --git a/system/readline/readline_common.c b/system/readline/readline_common.c
 index 0fd3b9396..8e8e727cf 100644
 --- a/system/readline/readline_common.c
@@ -915,7 +896,7 @@ index 2a37d2335..0b0f03252 100644
  #include <termios.h>
  
  #include "system/readline.h"
-@@ -107,16 +108,64 @@ static int readline_getc(FAR struct rl_common_s *vtbl)
+@@ -107,16 +108,65 @@ static int readline_getc(FAR struct rl_common_s *vtbl)
    return (int)buffer;
  }
  
@@ -969,6 +950,7 @@ index 2a37d2335..0b0f03252 100644
 +      usleep(READLINE_WRITE_RETRY_USEC);
 +    }
 +}
++
  /****************************************************************************
   * Name: readline_putc
   ****************************************************************************/
@@ -1017,40 +999,58 @@ index 2a37d2335..0b0f03252 100644
  }
  #endif
  
-@@ -209,17 +241,32 @@ ssize_t readline_fd(FAR char *buf, int buflen, int infd, int outfd)
+@@ -209,17 +241,44 @@ ssize_t readline_fd(FAR char *buf, int buflen, int infd, int outfd)
  
    struct readline_s vtbl;
    struct termios cfg;
-+  bool is_tty = false;
-+  bool canon = false;
++  struct termios saved;
++  bool restore = false;
 +#ifdef CONFIG_READLINE_ECHO
 +  bool echo = true;
 +#endif
    ssize_t ret;
  
-   if (isatty(infd))
+-  if (isatty(infd))
++  if (isatty(infd) && tcgetattr(infd, &saved) == 0)
      {
-+      is_tty = true;
-       tcgetattr(infd, &cfg);
-       if (cfg.c_lflag & ICANON)
-         {
-+          canon = true;
-           cfg.c_lflag &= ~ICANON;
-           tcsetattr(infd, TCSANOW, &cfg);
-           cfg.c_lflag |= ICANON;
-         }
-+
+-      tcgetattr(infd, &cfg);
+-      if (cfg.c_lflag & ICANON)
 +#ifdef CONFIG_READLINE_ECHO
-+#ifdef CONFIG_READLINE_FORCE_ECHO
-+      echo = true;
-+#else
-+      echo = (cfg.c_lflag & ECHO) != 0;
++      echo = (saved.c_lflag & ECHO) != 0;
 +#endif
++
++      /* readline_common() owns line editing while it is active.  Keep the
++       * terminal's normal canonical/echo settings for applications, but
++       * use byte-at-a-time, no-driver-echo input for this one read.
++       * Clear newline translations so readline_common() recognizes CR or
++       * LF itself.
++       */
++
++      cfg = saved;
++      cfg.c_iflag &= ~(INLCR | IGNCR | ICRNL);
++      cfg.c_lflag &= ~(ICANON | ECHO);
++      cfg.c_cc[VMIN] = 1;
++      cfg.c_cc[VTIME] = 0;
++
++      if (tcsetattr(infd, TCSANOW, &cfg) == 0)
+         {
+-          cfg.c_lflag &= ~ICANON;
+-          tcsetattr(infd, TCSANOW, &cfg);
+-          cfg.c_lflag |= ICANON;
++          restore = true;
+         }
++#ifdef CONFIG_READLINE_ECHO
++      else
++        {
++          /* The driver still owns echo if the temporary mode failed. */
++
++          echo = false;
++        }
 +#endif
      }
  
    /* Set up the vtbl structure */
-@@ -230,14 +277,14 @@ ssize_t readline_fd(FAR char *buf, int buflen, int infd, int outfd)
+@@ -230,14 +289,14 @@ ssize_t readline_fd(FAR char *buf, int buflen, int infd, int outfd)
  #ifdef CONFIG_READLINE_ECHO
    vtbl.vtbl.rl_putc  = readline_putc;
    vtbl.vtbl.rl_write = readline_write;
@@ -1063,9 +1063,10 @@ index 2a37d2335..0b0f03252 100644
    ret = readline_common(&vtbl.vtbl, buf, buflen);
  
 -  if (isatty(infd) && (cfg.c_lflag & ICANON))
-+  if (is_tty && canon)
++  if (restore)
      {
-       tcsetattr(infd, TCSANOW, &cfg);
+-      tcsetattr(infd, TCSANOW, &cfg);
++      tcsetattr(infd, TCSANOW, &saved);
      }
 diff --git a/system/telnetd/Kconfig b/system/telnetd/Kconfig
 index f3ad64de4..16bb3e81e 100644

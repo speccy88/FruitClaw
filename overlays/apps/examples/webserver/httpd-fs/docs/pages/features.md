@@ -111,7 +111,6 @@ Useful shell and built-in app features:
 CONFIG_NSH_BUILTIN_APPS=y
 CONFIG_NSH_READLINE=y
 CONFIG_NSH_USBCONSOLE=y
-CONFIG_READLINE_FORCE_ECHO=y
 CONFIG_READLINE_CMD_HISTORY=y
 CONFIG_READLINE_TABCOMPLETION=y
 CONFIG_SYSTEM_VI=y
@@ -124,8 +123,9 @@ CONFIG_SYSTEM_SPITOOL=y
 
 NuttX `help` shows the live command and app list.
 
-The CDC driver itself starts with driver echo off; readline provides the single
-visible command echo. FruitClaw's interactive prompts accept CR and LF so
+The CDC console stays in canonical, echo-enabled mode while applications run.
+NSH readline temporarily owns byte-at-a-time editing and restores the terminal
+before launching a command. FruitClaw's interactive prompts accept CR and LF so
 default `tio /dev/cu.usbmodem01` input works for setup commands.
 
 ## Display And Graphics
