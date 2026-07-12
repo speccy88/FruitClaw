@@ -4,7 +4,6 @@
 0004-network-service-hardening.patch
 0005-webserver-romfs.patch
 0006-deterministic-libapps-archive.patch
-0007-berry-nuttx-console.patch
 0008-vi-console-reliability.patch
 0009-termcurses-preserve-startup-input.patch
 0010-vi-audit-followups.patch
